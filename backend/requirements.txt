@@ -1,0 +1,38 @@
+# OmniStudy AI backend runtime dependencies
+# Python 3.11+ recommended on macOS Apple Silicon.
+
+# API server and configuration
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.17
+pydantic==2.10.2
+pydantic-settings==2.6.1
+python-dotenv==1.0.1
+
+# Persistence and document ingestion
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
+PyMuPDF==1.24.14
+python-pptx==1.0.2
+pillow==11.0.0
+
+# LLM routing and HTTP retries
+openai==1.55.3
+httpx==0.28.0
+tenacity==9.0.0
+
+# Optional local OCR and browser-based UMPASS token recovery
+pix2tex==0.1.2
+browser-cookie3==0.20.1
+playwright==1.49.1
+
+# Hands-free voice tutor
+faster-whisper==1.1.0
+edge-tts==6.1.19
+imageio-ffmpeg==0.5.1
+numpy==2.1.3
+websockets==14.1
+
+# Markdown and LaTeX export
+jinja2==3.1.4
+
