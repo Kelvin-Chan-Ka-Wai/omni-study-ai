@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
@@ -17,6 +17,7 @@ import {
   PlusCircle,
   Settings,
   Trash2,
+  Eraser,
 } from 'lucide-react';
 import {
   ActiveExamSession,
@@ -24,6 +25,7 @@ import {
   WrongQuestionItem,
 } from './types/assessment';
 import { BACKEND_URL, OmniStudyAPI } from './services/api';
+import { SectionTools, WorkspaceTools } from './components/layout/StudyTools';
 import { ExamHeaderTimer } from './components/exam/ExamHeaderTimer';
 import { McqFiveOptionCard } from './components/exam/McqFiveOptionCard';
 import { PasteSolutionBox } from './components/exam/PasteSolutionBox';
@@ -47,7 +49,12 @@ export function App() {
   const [textbookFile, setTextbookFile] = useState<File | null>(null);
   const [testbankFile, setTestbankFile] = useState<File | null>(null);
   const [onboarding, setOnboarding] = useState(false);
+
+  // Note Regeneration & Cleaning state
   const [regeneratingNotes, setRegeneratingNotes] = useState(false);
+  const [regenSeconds, setRegenSeconds] = useState(0);
+  const [regenModeLabel, setRegenModeLabel] = useState<'selected' | 'all' | null>(null);
+  const [cleaningNotes, setCleaningNotes] = useState(false);
 
   // Exam state
   const [examMode, setExamMode] = useState<'section_quiz' | 'mock_test' | 'midterm' | 'final'>('section_quiz');
@@ -58,9 +65,13 @@ export function App() {
   const [writtenAnswers, setWrittenAnswers] = useState<Record<number, string>>({});
   const [imagePaths, setImagePaths] = useState<Record<number, string>>({});
   const [timeSpentSeconds, setTimeSpentSeconds] = useState(0);
+  const [draftState, setDraftState] = useState('');
   const [isExamSubmitted, setIsExamSubmitted] = useState(false);
   const [submittingExam, setSubmittingExam] = useState(false);
+  const submittingRef = useRef(false);
 
+  const [wrongError, setWrongError] = useState('');
+  const [dueOnly, setDueOnly] = useState(false);
   // Wrong Question Bank state
   const [wrongItems, setWrongItems] = useState<WrongQuestionItem[]>([]);
   const [wrongFilter, setWrongFilter] = useState<'active' | 'graduated'>('active');
@@ -80,6 +91,15 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (!regeneratingNotes) {
+      setRegenSeconds(0);
+      return;
+    }
+    const iv = setInterval(() => setRegenSeconds((s) => s + 1), 1000);
+    return () => clearInterval(iv);
+  }, [regeneratingNotes]);
+
+  useEffect(() => {
     if (!generatingExam) {
       setGenSeconds(0);
       return;
@@ -88,7 +108,7 @@ export function App() {
     return () => clearInterval(iv);
   }, [generatingExam]);
 
-  const refreshChapters = async (selectId?: number) => {
+  const refreshChapters = async (selectId?: number, preserveSelection?: number[]) => {
     const list = await OmniStudyAPI.listChapters();
     setChapters(list);
     if (list.length === 0) {
@@ -100,9 +120,15 @@ export function App() {
     const exists = list.some((c) => c.id === targetId) ? targetId : list[0].id;
     const detail = await OmniStudyAPI.getChapterDetail(exists);
     setActiveChapter(detail);
-    setSelectedSectionIds(detail.sections.map((s) => s.id));
-    const wrongs = await OmniStudyAPI.listWrongQuestions(exists, wrongFilter);
-    setWrongItems(wrongs);
+    if (preserveSelection !== undefined) {
+      setSelectedSectionIds(preserveSelection);
+    } else {
+      setSelectedSectionIds(detail.sections.map((s) => s.id));
+    }
+    try {
+      const wrongs = await OmniStudyAPI.listWrongQuestions(exists, wrongFilter);
+      setWrongItems(wrongs); setWrongError('');
+    } catch { setWrongError('Could not load your mistakes. Retry loading.'); }
   };
 
   useEffect(() => {
@@ -112,9 +138,44 @@ export function App() {
 
   useEffect(() => {
     if (activeChapter) {
-      OmniStudyAPI.listWrongQuestions(activeChapter.id, wrongFilter).then(setWrongItems);
+      OmniStudyAPI.listWrongQuestions(activeChapter.id, wrongFilter).then((w) => { setWrongItems(w); setWrongError(''); }).catch(() => setWrongError('Could not load mistakes. Please retry.'));
     }
   }, [wrongFilter, activeChapter?.id]);
+
+  useEffect(() => {
+    const id = activeChapter?.id;
+    if (!id) return;
+    let canceled = false;
+    OmniStudyAPI.getActiveAssessment(id).then(exam => {
+      if (canceled) return;
+      setActiveExam(exam); setIsExamSubmitted(false);
+      const selections: Record<number,string[]> = {}, written: Record<number,string> = {};
+      exam?.draft_answers?.forEach(a => { if (Array.isArray(a.user_answer)) selections[a.question_id]=a.user_answer; else written[a.question_id]=a.user_answer || ''; });
+      if (exam) {
+        try {
+          const cached = JSON.parse(localStorage.getItem(`omnistudy-draft-${exam.session_id}`) || 'null');
+          if (cached && (!exam.deadline_at || exam.is_paused || Date.now() < new Date(exam.deadline_at).getTime())) {
+            Object.assign(selections, cached.mcq || {}); Object.assign(written, cached.written || {});
+          }
+        } catch { /* Ignore corrupted optional recovery cache. */ }
+      }
+      setMcqSelections(selections); setWrittenAnswers(written); setImagePaths({});
+      setDraftState(exam ? 'Recovered saved assessment. Open Exam to resume.' : '');
+    });
+    return () => { canceled = true; };
+  }, [activeChapter?.id]);
+
+  const payloadRef = useRef<{question_id:number;user_answer:string|string[];handwritten_image_path?:string}[]>([]);
+  payloadRef.current = activeExam?.questions.map(q => ({ question_id:q.id, user_answer:q.question_type.startsWith('mcq') ? mcqSelections[q.id] || [] : writtenAnswers[q.id] || '', handwritten_image_path:imagePaths[q.id] })) || [];
+  useEffect(() => {
+    if (!activeExam || isExamSubmitted || activeExam.status === 'grading') return;
+    if (!activeExam.is_paused && activeExam.deadline_at && Date.now() >= new Date(activeExam.deadline_at).getTime()) return;
+    localStorage.setItem(`omnistudy-draft-${activeExam.session_id}`, JSON.stringify({ mcq: mcqSelections, written: writtenAnswers }));
+    const timer = setTimeout(() => {
+      OmniStudyAPI.saveDraft(activeExam.session_id,payloadRef.current,timeSpentSeconds).then(()=>setDraftState('Answers saved')).catch(()=>setDraftState('Autosave unavailable or writing time ended. Last saved draft is preserved.'));
+    }, 650);
+    return () => clearTimeout(timer);
+  }, [activeExam?.session_id, mcqSelections, writtenAnswers, imagePaths, isExamSubmitted]);
 
   const handleDeleteChapter = async (
     e: React.MouseEvent,
@@ -133,6 +194,22 @@ export function App() {
       setShowOnboardModal(true);
     } else {
       await refreshChapters(remaining[0].id);
+    }
+  };
+
+  const handleCleanNoteSpace = async () => {
+    if (!activeChapter) return;
+    const targetCount = selectedSectionIds.length;
+    if (targetCount === 0) {
+      return;
+    }
+    if (!window.confirm(`Delete saved notes for ${targetCount} selected sections? You can restore them from note history.`)) return;
+    setCleaningNotes(true);
+    try {
+      await OmniStudyAPI.clearChapterNotes(activeChapter.id, selectedSectionIds);
+      await refreshChapters(activeChapter.id, selectedSectionIds);
+    } finally {
+      setCleaningNotes(false);
     }
   };
 
@@ -163,6 +240,7 @@ export function App() {
 
   const handleStartAssessment = async () => {
     if (!activeChapter || selectedSectionIds.length === 0) return;
+    if (activeExam && !isExamSubmitted && !window.confirm('Start a new paper? Your existing assessment remains saved and can be resumed from History.')) return;
     setGeneratingExam(true);
     try {
       const session = await OmniStudyAPI.generateAssessment(
@@ -200,7 +278,8 @@ export function App() {
   };
 
   const handleSubmitExam = async () => {
-    if (!activeExam || isExamSubmitted || submittingExam) return;
+    if (!activeExam || isExamSubmitted || submittingRef.current) return;
+    submittingRef.current = true;
     setSubmittingExam(true);
     try {
       const answersPayload = activeExam.questions.map((q) => ({
@@ -230,16 +309,28 @@ export function App() {
         }),
       });
       setIsExamSubmitted(true);
-      await refreshChapters(activeChapter?.id);
+      setDraftState('Assessment submitted and graded.');
+      localStorage.removeItem(`omnistudy-draft-${activeExam.session_id}`);
+      await refreshChapters(activeChapter?.id, selectedSectionIds);
     } finally {
       setSubmittingExam(false);
+      submittingRef.current = false;
     }
+  };
+
+  const toggleSectionCheckbox = (secId: number) => {
+    setSelectedSectionIds((prev) =>
+      prev.includes(secId) ? prev.filter((id) => id !== secId) : [...prev, secId]
+    );
   };
 
   const slidePdfUrl =
     activeChapter?.slide_file_path?.endsWith('.pdf')
       ? `${BACKEND_URL}${activeChapter.slide_file_path}`
       : null;
+
+  const visibleStudySections =
+    activeChapter?.sections.filter((s) => selectedSectionIds.includes(s.id)) || [];
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -331,12 +422,31 @@ export function App() {
             </div>
           </div>
 
-          {/* Slide-Scoped Sections */}
+          {/* Slide-Scoped Sections with All / None Toggles */}
           {activeChapter && (
             <div>
               <div className="flex items-center justify-between px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-                <span>Slide-Scoped Sections</span>
-                <span>&ge;80% Gate</span>
+                <span>
+                  Ticked Sections ({selectedSectionIds.length}/{activeChapter.sections.length})
+                </span>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSectionIds(activeChapter.sections.map((s) => s.id))}
+                    className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-indigo-300 hover:bg-slate-700"
+                    title="Select all sections"
+                  >
+                    All
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setSelectedSectionIds([])}
+                    className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-medium text-rose-300 hover:bg-slate-700"
+                    title="Untick all sections to clear workspace"
+                  >
+                    None
+                  </button>
+                </div>
               </div>
               <div className="space-y-1.5">
                 {activeChapter.sections.map((sec) => {
@@ -344,16 +454,10 @@ export function App() {
                   return (
                     <div
                       key={sec.id}
-                      onClick={() =>
-                        setSelectedSectionIds((prev) =>
-                          prev.includes(sec.id)
-                            ? prev.filter((id) => id !== sec.id)
-                            : [...prev, sec.id]
-                        )
-                      }
+                      onClick={() => toggleSectionCheckbox(sec.id)}
                       className={`cursor-pointer rounded-lg border p-2.5 text-xs transition ${
                         checked
-                          ? 'border-slate-700 bg-slate-800/80 text-slate-100'
+                          ? 'border-indigo-500/50 bg-indigo-950/30 text-slate-100'
                           : 'border-slate-800/60 bg-slate-950/40 text-slate-500'
                       }`}
                     >
@@ -466,7 +570,7 @@ export function App() {
                 <Play className="h-3.5 w-3.5" />
                 {generatingExam
                   ? `Parallel Generating (${genSeconds}s)...`
-                  : `Generate (${selectedSectionIds.length} Sec)`}
+                  : `Generate Quiz/Exam (${selectedSectionIds.length} Sec)`}
               </button>
 
               <button
@@ -477,30 +581,57 @@ export function App() {
                 Split View
               </button>
 
+              {/* Top Bar Exports strictly export ONLY the currently ticked sections */}
               <a
-                href={OmniStudyAPI.getExportUrl('chapter', activeChapter.id, 'pdf')}
+                href={OmniStudyAPI.getExportUrl(
+                  'chapter',
+                  activeChapter.id,
+                  'pdf',
+                  true,
+                  selectedSectionIds
+                )}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-rose-500 transition"
-                title="Download / Save Study Notes as PDF"
+                className={`flex items-center gap-1 rounded-lg bg-rose-600 px-2.5 py-1.5 text-xs font-semibold text-white hover:bg-rose-500 transition ${
+                  selectedSectionIds.length === 0 ? 'pointer-events-none opacity-40' : ''
+                }`}
+                title="Download PDF of Selected Sections Only"
               >
                 <Download className="h-3.5 w-3.5" />
-                Notes .PDF
+                Selected .PDF ({selectedSectionIds.length})
               </a>
               <a
-                href={OmniStudyAPI.getExportUrl('chapter', activeChapter.id, 'md')}
+                href={OmniStudyAPI.getExportUrl(
+                  'chapter',
+                  activeChapter.id,
+                  'md',
+                  true,
+                  selectedSectionIds
+                )}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+                className={`flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-slate-700 ${
+                  selectedSectionIds.length === 0 ? 'pointer-events-none opacity-40' : ''
+                }`}
+                title="Download Markdown of Selected Sections Only"
               >
                 <Download className="h-3.5 w-3.5 text-indigo-400" />
                 .MD
               </a>
               <a
-                href={OmniStudyAPI.getExportUrl('chapter', activeChapter.id, 'tex')}
+                href={OmniStudyAPI.getExportUrl(
+                  'chapter',
+                  activeChapter.id,
+                  'tex',
+                  true,
+                  selectedSectionIds
+                )}
                 target="_blank"
                 rel="noreferrer"
-                className="flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-slate-700"
+                className={`flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-800 px-2.5 py-1.5 text-xs text-slate-200 hover:bg-slate-700 ${
+                  selectedSectionIds.length === 0 ? 'pointer-events-none opacity-40' : ''
+                }`}
+                title="Download LaTeX of Selected Sections Only"
               >
                 <Download className="h-3.5 w-3.5 text-emerald-400" />
                 .TEX
@@ -519,7 +650,7 @@ export function App() {
                   Priority Scope: {activeChapter.chapter_title}
                 </span>
                 <span className="text-[11px] text-slate-400">
-                  Only checked slide sections are tested
+                  Selected: {selectedSectionIds.length}/{activeChapter.sections.length} sections
                 </span>
               </div>
               {slidePdfUrl ? (
@@ -531,9 +662,9 @@ export function App() {
               ) : (
                 <div className="flex-1 overflow-y-auto p-5 space-y-4">
                   <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 p-3 text-xs text-indigo-200">
-                    Parsed Slide Sections Outline (Strict Scope Boundary Active)
+                    Click any section in the left sidebar to tick/untick it.
                   </div>
-                  {activeChapter.sections.map((sec) => (
+                  {visibleStudySections.map((sec) => (
                     <div
                       key={sec.id}
                       className="rounded-xl border border-slate-800 bg-slate-900/60 p-4 space-y-2"
@@ -549,7 +680,7 @@ export function App() {
                           remarkPlugins={[remarkMath]}
                           rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
                         >
-                          {sec.extracted_study_notes || ''}
+                          {sec.extracted_study_notes || '_Note space is clean. Click Generate Ticked Sections to write notes._'}
                         </ReactMarkdown>
                       </div>
                     </div>
@@ -590,28 +721,76 @@ export function App() {
                       )}
                     </div>
                     <p className="mt-1 text-xs text-slate-400">
-                      Strict Slide-Prioritized Study Guide • Click{' '}
-                      <strong className="text-indigo-300">Regenerate Structured Notes</strong> to reformat notes with clean LaTeX math spacing.
+                      Showing <strong className="text-emerald-400">{selectedSectionIds.length}</strong> of{' '}
+                      {activeChapter.sections.length} section(s). Generating or downloading applies{' '}
+                      <strong className="text-white">strictly to your ticked sections</strong>.
                     </p>
                   </div>
 
                   <div className="flex flex-wrap items-center gap-2">
+                    {/* Button 1: Generate & Overwrite Notes ONLY for Ticked Sections */}
+                    <button
+                      type="button"
+                      disabled={regeneratingNotes || selectedSectionIds.length === 0}
+                      onClick={async () => {
+                        const keepSelected = [...selectedSectionIds];
+                        setRegeneratingNotes(true);
+                        setRegenModeLabel('selected');
+                        try {
+                          await OmniStudyAPI.regenerateChapterNotes(activeChapter.id, keepSelected);
+                          await refreshChapters(activeChapter.id, keepSelected);
+                        } finally {
+                          setRegeneratingNotes(false);
+                          setRegenModeLabel(null);
+                        }
+                      }}
+                      className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-50 transition"
+                      title="Generate & overwrite structured LaTeX notes ONLY for the ticked (✓) sections"
+                    >
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                      {regeneratingNotes && regenModeLabel === 'selected'
+                        ? `Generating Selected (${regenSeconds}s)...`
+                        : `Generate Ticked Sections (${selectedSectionIds.length})`}
+                    </button>
+
+                    {/* Button 2: Select All & Generate All Sections in Parallel */}
                     <button
                       type="button"
                       disabled={regeneratingNotes}
                       onClick={async () => {
+                        const allIds = activeChapter.sections.map((s) => s.id);
+                        setSelectedSectionIds(allIds);
                         setRegeneratingNotes(true);
+                        setRegenModeLabel('all');
                         try {
-                          await OmniStudyAPI.regenerateChapterNotes(activeChapter.id);
-                          await refreshChapters(activeChapter.id);
+                          await OmniStudyAPI.regenerateChapterNotes(activeChapter.id, allIds);
+                          await refreshChapters(activeChapter.id, allIds);
                         } finally {
                           setRegeneratingNotes(false);
+                          setRegenModeLabel(null);
                         }
                       }}
                       className="flex items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-3 py-1.5 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/25 disabled:opacity-50 transition"
+                      title="Select all sections and generate all study notes in parallel"
                     >
                       <Sparkles className="h-3.5 w-3.5 text-indigo-400" />
-                      {regeneratingNotes ? 'Formatting Structured Notes...' : 'Regenerate Structured Notes'}
+                      {regeneratingNotes && regenModeLabel === 'all'
+                        ? `Generating All (${regenSeconds}s)...`
+                        : `Select All & Generate All (${activeChapter.sections.length})`}
+                    </button>
+
+                    {/* Button 3: Clean Note Space (Clears the existing note text of ticked sections) */}
+                    <button
+                      type="button"
+                      disabled={cleaningNotes || regeneratingNotes || selectedSectionIds.length === 0}
+                      onClick={handleCleanNoteSpace}
+                      className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-500/25 disabled:opacity-50 transition"
+                      title="Clean / wipe the existing note text for the ticked sections"
+                    >
+                      <Eraser className="h-3.5 w-3.5 text-amber-400" />
+                      {cleaningNotes
+                        ? 'Cleaning...'
+                        : `Delete Saved Notes (${selectedSectionIds.length})`}
                     </button>
 
                     <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 px-3 py-1.5 text-xs font-semibold text-purple-200 hover:bg-purple-500/25 transition">
@@ -619,7 +798,7 @@ export function App() {
                       <span>
                         {activeChapter.testbank_file_path
                           ? 'Update Testbank'
-                          : '+ Attach Testbank (Optional)'}
+                          : '+ Attach Testbank'}
                       </span>
                       <input
                         type="file"
@@ -629,57 +808,119 @@ export function App() {
                           const f = e.target.files?.[0];
                           if (!f) return;
                           await OmniStudyAPI.uploadChapterTestbank(activeChapter.id, f);
-                          await refreshChapters(activeChapter.id);
+                          await refreshChapters(activeChapter.id, selectedSectionIds);
                         }}
                       />
                     </label>
 
+                    {/* Button 4: Download PDF for Selected Sections ONLY */}
                     <a
-                      href={OmniStudyAPI.getExportUrl('chapter', activeChapter.id, 'pdf')}
+                      href={OmniStudyAPI.getExportUrl(
+                        'chapter',
+                        activeChapter.id,
+                        'pdf',
+                        true,
+                        selectedSectionIds
+                      )}
                       target="_blank"
                       rel="noreferrer"
-                      className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500 transition"
+                      className={`flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-500 transition ${
+                        selectedSectionIds.length === 0 ? 'pointer-events-none opacity-40' : ''
+                      }`}
+                      title="Download PDF containing ONLY the currently ticked sections"
                     >
                       <Download className="h-3.5 w-3.5" />
-                      Download Notes (.PDF)
+                      Download Selected ({selectedSectionIds.length}) .PDF
                     </a>
                   </div>
                 </div>
 
-                {activeChapter.sections
-                  .filter((s) => selectedSectionIds.includes(s.id))
-                  .map((sec) => (
+                {/* ONLY render the sections that the user has ticked! */}
+                <WorkspaceTools chapterId={activeChapter.id} refresh={() => refreshChapters(activeChapter.id, selectedSectionIds)} />
+                {visibleStudySections.length === 0 ? (
+                  <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/30 p-12 text-center space-y-3">
+                    <Eraser className="mx-auto h-8 w-8 text-slate-500" />
+                    <div className="text-sm font-bold text-slate-300">
+                      Note Space is Clean (No Sections Ticked)
+                    </div>
+                    <p className="text-xs text-slate-400 max-w-md mx-auto">
+                      Tick (<strong className="text-indigo-400">✓</strong>) the section(s) you want to study in the left sidebar, then click{' '}
+                      <strong className="text-emerald-300">Generate Ticked Sections</strong>.
+                    </p>
+                  </div>
+                ) : (
+                  visibleStudySections.map((sec) => (
                     <div
                       key={sec.id}
                       className="rounded-2xl border border-slate-800 bg-slate-900/70 p-6 space-y-3"
                     >
+                      <SectionTools chapterId={activeChapter.id} section={sec} refresh={() => refreshChapters(activeChapter.id, selectedSectionIds)} />
                       <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-                        <div>
-                          <span className="text-xs font-bold uppercase text-indigo-400">
-                            {sec.section_code} • {sec.slide_pages}
+                        <label className="flex cursor-pointer items-start gap-3">
+                          <input
+                            type="checkbox"
+                            checked={true}
+                            onChange={() => toggleSectionCheckbox(sec.id)}
+                            title="Untick to hide this section from workspace & PDF export"
+                            className="mt-1 h-4 w-4 rounded border-slate-600 text-indigo-600"
+                          />
+                          <div>
+                            <span className="text-xs font-bold uppercase text-indigo-400">
+                              {sec.section_code} • {sec.slide_pages}
+                            </span>
+                            <h2 className="text-base font-bold text-white">{sec.section_title}</h2>
+                          </div>
+                        </label>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={regeneratingNotes}
+                            onClick={async () => {
+                              const keep = [...selectedSectionIds];
+                              setRegeneratingNotes(true);
+                              setRegenModeLabel('selected');
+                              try {
+                                await OmniStudyAPI.regenerateChapterNotes(activeChapter.id, [sec.id]);
+                                await refreshChapters(activeChapter.id, keep);
+                              } finally {
+                                setRegeneratingNotes(false);
+                                setRegenModeLabel(null);
+                              }
+                            }}
+                            className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-[11px] font-semibold text-indigo-300 hover:bg-indigo-500/20"
+                          >
+                            Regenerate This Section
+                          </button>
+                          <span
+                            className={`rounded-lg px-3 py-1 text-xs font-bold ${
+                              sec.is_mastered
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : 'bg-slate-800 text-slate-300'
+                            }`}
+                          >
+                            Best Quiz: {(sec.best_accuracy * 100).toFixed(0)}%
                           </span>
-                          <h2 className="text-base font-bold text-white">{sec.section_title}</h2>
                         </div>
-                        <span
-                          className={`rounded-lg px-3 py-1 text-xs font-bold ${
-                            sec.is_mastered
-                              ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
-                              : 'bg-slate-800 text-slate-300'
-                          }`}
-                        >
-                          Best Quiz Score: {(sec.best_accuracy * 100).toFixed(0)}% (Target &ge;80%)
-                        </span>
                       </div>
                       <div className="study-markdown prose prose-invert max-w-none text-sm leading-relaxed">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkMath]}
-                          rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-                        >
-                          {sec.extracted_study_notes || '_No study notes generated._'}
-                        </ReactMarkdown>
+                        {sec.extracted_study_notes ? (
+                          <ReactMarkdown
+                            remarkPlugins={[remarkMath]}
+                            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
+                          >
+                            {sec.extracted_study_notes}
+                          </ReactMarkdown>
+                        ) : (
+                          <div className="rounded-xl border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-xs text-slate-400">
+                            Note space cleaned for <strong>{sec.section_code}</strong>. Click{' '}
+                            <strong className="text-emerald-300">Generate Ticked Sections</strong> or{' '}
+                            <strong className="text-indigo-300">Regenerate This Section</strong> to write fresh structured notes.
+                          </div>
+                        )}
                       </div>
                     </div>
-                  ))}
+                  ))
+                )}
               </div>
             ) : activeTab === 'exam' ? (
               <div className="mx-auto max-w-4xl space-y-6">
@@ -693,16 +934,9 @@ export function App() {
                   </div>
                 ) : (
                   <>
-                    <ExamHeaderTimer
-                      mode={activeExam.mode}
-                      timeLimitMinutes={activeExam.time_limit_minutes}
-                      gracePeriodMinutes={activeExam.grace_period_minutes}
-                      isSubmitted={isExamSubmitted}
-                      onTimeUpdate={(secs) => setTimeSpentSeconds(secs)}
-                      onAutoSubmit={handleSubmitExam}
-                    />
+                    <ExamHeaderTimer session={activeExam} isSubmitted={isExamSubmitted} onSessionChange={setActiveExam} onTimeUpdate={setTimeSpentSeconds} onAutoSubmit={handleSubmitExam} />
+                    <p role="status" className="text-xs text-slate-400">{draftState}</p>
 
-                    {/* Always-Visible PDF / MD / TEX Download Bar for Current Quiz/Test/Exam */}
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-2.5 text-xs">
                       <span className="text-slate-300 font-medium">
                         Paper Export ({activeExam.questions.length} Questions • {activeExam.max_score} pts):
@@ -776,7 +1010,7 @@ export function App() {
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
                   <div>
                     <h2 className="text-base font-bold text-white">
-                      Wrong Question Collection (錯題本) — 3-Strike Auto-Graduation
+                      Wrong Question Collection (錯題本) — Spaced Review
                     </h2>
                     <p className="text-xs text-slate-400">
                       Answer a question (or its mutated twin) correctly 3 times in a row (0/3 &rarr; 3/3) to graduate it automatically.
@@ -823,16 +1057,16 @@ export function App() {
                   </div>
                 </div>
 
-                {wrongItems.length === 0 ? (
+                {wrongError ? <div role="alert" className="p-5 text-rose-200">{wrongError} <button onClick={() => refreshChapters(activeChapter.id, selectedSectionIds)}>Retry</button></div> : wrongItems.length === 0 ? (
                   <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-10 text-center text-xs text-slate-400">
                     No {wrongFilter} questions in this chapter yet.
                   </div>
                 ) : (
-                  wrongItems.map((item) => (
+                  wrongItems.filter(item => !dueOnly || !item.next_review_at || new Date(item.next_review_at).getTime() <= Date.now()).map((item) => (
                     <WrongQuestionCard
                       key={item.id}
                       item={item}
-                      onUpdated={() => refreshChapters(activeChapter.id)}
+                      onUpdated={() => refreshChapters(activeChapter.id, selectedSectionIds)}
                     />
                   ))
                 )}
@@ -850,6 +1084,12 @@ export function App() {
                         {h.mode.replace('_', ' ')}
                       </span>
                       <div className="text-slate-400">
+                        <button className="underline text-indigo-300 mr-3" onClick={async () => {
+                          const exam = await OmniStudyAPI.getAssessment(h.session_id);setActiveExam(exam);setIsExamSubmitted(exam.status === 'completed');
+                          const selections: Record<number,string[]> = {}, written: Record<number,string> = {};
+                          exam.draft_answers?.forEach(a=>{if(Array.isArray(a.user_answer))selections[a.question_id]=a.user_answer;else written[a.question_id]=a.user_answer || '';});
+                          setMcqSelections(selections);setWrittenAnswers(written);setImagePaths({});setActiveTab('exam');
+                        }}>Open / resume</button>
                         Started: {new Date(h.started_at).toLocaleString()}
                       </div>
                     </div>
