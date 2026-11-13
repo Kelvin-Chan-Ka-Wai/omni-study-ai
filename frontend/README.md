@@ -1,10 +1,7 @@
 # Frontend
 
-React + Vite single-page interface for chapter setup, slide review, study notes, timed assessments, voice tutoring, settings, and the wrong-question bank.
+React + Vite workspace for lecture notes, timed assessments, wrong-question practice and voice tutoring. Note history/source links and backup tools are separate components under `src/components/layout`.
 
-```bash
-npm install
-npm run dev
-```
+Run `npm ci` and `npm run dev -- --host 127.0.0.1`. Use http://127.0.0.1:5173 with the backend on http://127.0.0.1:8000. The API client establishes a local HttpOnly session; credentials are never saved in browser draft recovery storage. `VITE_BACKEND_URL` is available for isolated local UI testing.
 
-The development UI expects the FastAPI backend at `http://127.0.0.1:8000`.
+`npm run build` checks TypeScript and produces the local production bundle. `dist/` and `node_modules/` stay out of Git. Existing Settings/GenAI fields and provider integration are preserved.
