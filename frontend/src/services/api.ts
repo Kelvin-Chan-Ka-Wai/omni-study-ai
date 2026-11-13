@@ -5,30 +5,77 @@ import {
   WrongQuestionItem,
 } from '../types/assessment';
 
-export const BACKEND_URL = 'http://localhost:8000';
+export const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || `http://${window.location.hostname || '127.0.0.1'}:8000`;
 
 const api = axios.create({
   baseURL: BACKEND_URL,
+  timeout: 120000,
+  withCredentials: true,
 });
 
+let session: Promise<unknown> | null = null;
+api.interceptors.request.use(async (config) => {
+  if (!session) session = axios.get(`${BACKEND_URL}/api/session`, { withCredentials: true }).catch((error) => { session = null; throw error; });
+  await session;
+  return config;
+});
+api.interceptors.response.use((response) => response, (error) => {
+  if (error.response?.status === 401) session = null;
+  window.dispatchEvent(new CustomEvent('omnistudy-error', { detail: error.response?.data?.detail || error.message || 'Request failed. Please retry.' }));
+  return Promise.reject(error);
+});
+
+let currentJob: string | null = null;
+async function generateJob(payload: object) {
+  const { data } = await api.post('/api/jobs', payload);
+  currentJob = data.job_id;
+  window.dispatchEvent(new CustomEvent('omnistudy-job', { detail: true }));
+  try {
+    while (true) {
+      const { data: job } = await api.get(`/api/jobs/${data.job_id}`);
+      if (job.status === 'completed') return job.result;
+      if (job.status === 'failed' || job.status === 'canceled') {
+        const message = job.message || 'Generation canceled';
+        window.dispatchEvent(new CustomEvent('omnistudy-error', { detail: message }));
+        throw new Error(message);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 800));
+    }
+  } finally {
+    currentJob = null;
+    window.dispatchEvent(new CustomEvent('omnistudy-job', { detail: false }));
+  }
+}
+
 export const OmniStudyAPI = {
-  async syncBrowserToken() {
-    const { data } = await api.post("/api/settings/sync-browser-token");
+  async restoreBackup(form: FormData) { return (await api.post('/api/backup/restore', form)).data; },
+  async cancelGeneration() { if (currentJob) await api.delete(`/api/jobs/${currentJob}`); },
+  async getActiveAssessment(id: number): Promise<ActiveExamSession | null> { return (await api.get(`/api/assessments/active/${id}`)).data; },
+  async getAssessment(id: number): Promise<ActiveExamSession> { return (await api.get(`/api/assessments/${id}`)).data; },
+  async saveDraft(id: number, answers: object[], time: number) { return (await api.put(`/api/assessments/${id}/draft`, { answers, time_spent_seconds: time })).data; },
+  async controlTimer(id: number, isPaused: boolean, grace = false): Promise<ActiveExamSession> { return (await api.patch(`/api/assessments/${id}/timer`, { is_paused: isPaused, time_spent_seconds: 0, enter_grace_upload: grace })).data; },
+  async noteVersions(chapter: number, section: number): Promise<{ id: number; reason: string; created_at: string }[]> { return (await api.get(`/api/chapters/${chapter}/sections/${section}/versions`)).data; },
+  async restoreNote(chapter: number, section: number, version: number) { return (await api.post(`/api/chapters/${chapter}/sections/${section}/restore/${version}`)).data; },
+  async sources(chapter: number, section: number): Promise<{ pages: number[]; citations: {page: number; url: string}[] }> { return (await api.get(`/api/chapters/${chapter}/sections/${section}/sources`)).data; },
+  async transcribeImage(session: number, question: number) { return (await api.post(`/api/assessments/${session}/questions/${question}/transcribe`)).data; },
+  async saveSlideText(chapter: number, page: number, text: string) { return (await api.put(`/api/chapters/${chapter}/transcription`, { page, text })).data; },
+  async getHealth() {
+    const { data } = await api.get('/api/health');
     return data;
   },
 
   async getSettings() {
-    const { data } = await api.get("/api/settings");
+    const { data } = await api.get('/api/settings');
     return data;
   },
 
-  async updateSettings(payload: Record<string, any>) {
-    const { data } = await api.put("/api/settings", payload);
+  async updateSettings(payload: any) {
+    const { data } = await api.put('/api/settings', payload);
     return data;
   },
 
-  async getHealth() {
-    const { data } = await api.get('/api/health');
+  async syncBrowserToken() {
+    const { data } = await api.post('/api/settings/sync-browser-token');
     return data;
   },
 
@@ -37,13 +84,13 @@ export const OmniStudyAPI = {
     return data;
   },
 
-  async deleteChapter(chapterId: number) {
-    const { data } = await api.delete(`/api/chapters/${chapterId}`);
+  async getChapterDetail(chapterId: number): Promise<ChapterSummary> {
+    const { data } = await api.get(`/api/chapters/${chapterId}`);
     return data;
   },
 
-  async getChapterDetail(chapterId: number): Promise<ChapterSummary> {
-    const { data } = await api.get(`/api/chapters/${chapterId}`);
+  async deleteChapter(chapterId: number) {
+    const { data } = await api.delete(`/api/chapters/${chapterId}`);
     return data;
   },
 
@@ -58,15 +105,9 @@ export const OmniStudyAPI = {
     form.append('course_name', courseName);
     form.append('chapter_title', chapterTitle);
     form.append('slide_file', slideFile);
-    if (textbookFile) {
-      form.append('textbook_file', textbookFile);
-    }
-    if (testbankFile) {
-      form.append('testbank_file', testbankFile);
-    }
-    const { data } = await api.post('/api/chapters/onboard', form, {
-      headers: { 'Content-Type': 'multipart/form-data' },
-    });
+    if (textbookFile) form.append('textbook_file', textbookFile);
+    if (testbankFile) form.append('testbank_file', testbankFile);
+    const { data } = await api.post('/api/chapters/onboard', form);
     return data;
   },
 
@@ -77,81 +118,47 @@ export const OmniStudyAPI = {
     return data;
   },
 
-  async regenerateChapterNotes(chapterId: number) {
-    const { data } = await api.post(`/api/chapters/${chapterId}/regenerate-notes`);
-    return data;
-  },
-
-  async generateAssessment(
-    chapterId: number,
-    mode: 'section_quiz' | 'mock_test' | 'midterm' | 'final',
-    sectionIds: number[]
-  ): Promise<ActiveExamSession> {
-    const { data } = await api.post('/api/assessments/generate', {
-      chapter_id: chapterId,
-      mode,
-      section_ids: sectionIds,
+  async clearChapterNotes(chapterId: number, sectionIds?: number[]) {
+    const { data } = await api.post(`/api/chapters/${chapterId}/clear-notes`, {
+      section_ids: sectionIds || [],
     });
     return data;
   },
 
-  async updateExamTimer(
-    sessionId: number,
-    isPaused: boolean,
-    timeSpentSeconds: number,
-    enterGraceUpload = false
-  ) {
-    const { data } = await api.patch(`/api/assessments/${sessionId}/timer`, {
-      is_paused: isPaused,
-      time_spent_seconds: timeSpentSeconds,
-      enter_grace_upload: enterGraceUpload,
+  async regenerateChapterNotes(chapterId: number, sectionIds?: number[]) {
+    return generateJob({ kind: 'notes', chapter_id: chapterId, section_ids: sectionIds || [] });
+  },
+
+  async generateAssessment(chapterId: number, mode: 'section_quiz' | 'mock_test' | 'midterm' | 'final', sectionIds: number[]): Promise<ActiveExamSession> {
+    return generateJob({ kind: 'assessment', chapter_id: chapterId, mode, section_ids: sectionIds });
+  },
+
+  async pasteClipboardImage(sessionId: number, questionId: number, imageBase64: string) {
+    const { data } = await api.post(`/api/assessments/${sessionId}/questions/${questionId}/paste-image`, {
+      image_base64: imageBase64,
     });
     return data;
   },
 
-  async pasteClipboardImage(
-    sessionId: number,
-    questionId: number,
-    imageBase64: string
-  ): Promise<{
-    question_id: number;
-    handwritten_image_path: string;
-    preview_url: string;
-  }> {
-    const { data } = await api.post(
-      `/api/assessments/${sessionId}/questions/${questionId}/paste-image`,
-      { image_base64: imageBase64 }
-    );
-    return data;
-  },
-
-  async uploadSolutionImageFile(
-    sessionId: number,
-    questionId: number,
-    file: File
-  ): Promise<{
-    question_id: number;
-    handwritten_image_path: string;
-    preview_url: string;
-  }> {
+  async uploadSolutionImageFile(sessionId: number, questionId: number, file: File) {
     const form = new FormData();
+    form.append('session_id', String(sessionId));
+    form.append('question_id', String(questionId));
     form.append('image_file', file);
-    const { data } = await api.post(
-      `/api/assessments/${sessionId}/questions/${questionId}/upload-image`,
-      form
-    );
+    const { data } = await api.post(`/api/assessments/${sessionId}/questions/${questionId}/upload-image`, form);
     return data;
   },
 
-  async submitAssessment(
-    sessionId: number,
-    timeSpentSeconds: number,
-    answers: Array<{
-      question_id: number;
-      user_answer: string | string[];
-      handwritten_image_path?: string;
-    }>
-  ) {
+  async uploadHandwrittenImage(sessionId: number, questionId: number, imageBlob: Blob) {
+    const form = new FormData();
+    form.append('session_id', String(sessionId));
+    form.append('question_id', String(questionId));
+    form.append('image_file', imageBlob, 'paste_solution.png');
+    const { data } = await api.post(`/api/assessments/${sessionId}/questions/${questionId}/upload-image`, form);
+    return data;
+  },
+
+  async submitAssessment(sessionId: number, timeSpentSeconds: number, answers: any[]) {
     const { data } = await api.post(`/api/assessments/${sessionId}/submit`, {
       time_spent_seconds: timeSpentSeconds,
       answers,
@@ -160,17 +167,12 @@ export const OmniStudyAPI = {
   },
 
   async listWrongQuestions(
-    chapterId?: number,
-    status: 'active' | 'graduated' | 'all' = 'active'
+    chapterId: number,
+    status: 'active' | 'graduated' = 'active'
   ): Promise<WrongQuestionItem[]> {
-    const { data } = await api.get('/api/wrong-bank', {
-      params: { chapter_id: chapterId, status },
+    const { data } = await api.get(`/api/wrong-bank/${chapterId}`, {
+      params: { status },
     });
-    return data;
-  },
-
-  async mutateWrongQuestion(wrongId: number): Promise<WrongQuestionItem> {
-    const { data } = await api.post(`/api/wrong-bank/${wrongId}/mutate`);
     return data;
   },
 
@@ -181,11 +183,16 @@ export const OmniStudyAPI = {
     return data;
   },
 
+  async mutateWrongQuestion(wrongId: number) {
+    const { data } = await api.post(`/api/wrong-bank/${wrongId}/mutate`);
+    return data;
+  },
+
   async transcribeAudio(audioBlob: Blob, voiceLang: string): Promise<{ transcript: string }> {
     const form = new FormData();
-    form.append("audio_file", audioBlob, "speech.webm");
-    form.append("voice_lang", voiceLang);
-    const { data } = await api.post("/api/voice/transcribe", form);
+    form.append('audio_file', audioBlob, 'speech.webm');
+    form.append('voice_lang', voiceLang);
+    const { data } = await api.post('/api/voice/transcribe', form);
     return data;
   },
 
@@ -193,15 +200,9 @@ export const OmniStudyAPI = {
     chapter_id: number;
     section_ids: number[];
     user_transcript: string;
-    history: Array<{ role: string; content: string }>;
+    history: { role: string; content: string }[];
     voice_lang: string;
-  }): Promise<{
-    reply_markdown: string;
-    audio_base64?: string | null;
-    audio_chunks?: string[];
-    provider_used: string;
-    model_used: string;
-  }> {
+  }) {
     const { data } = await api.post('/api/voice/discuss', payload);
     return data;
   },
@@ -210,8 +211,15 @@ export const OmniStudyAPI = {
     type: 'chapter' | 'exam' | 'wrong-bank',
     id: number,
     fmt: 'md' | 'tex' | 'pdf',
-    includeSolutions = true
+    includeSolutions: boolean = true,
+    sectionIds?: number[]
   ) {
-    return `${BACKEND_URL}/api/export/${type}/${id}?fmt=${fmt}&include_solutions=${includeSolutions}`;
+    if (type === 'exam') {
+      return `${BACKEND_URL}/api/export/exam/${id}?fmt=${fmt}&include_solutions=${includeSolutions}`;
+    }
+    if (type === 'chapter') {
+      return `${BACKEND_URL}/api/export/chapter/${id}?fmt=${fmt}&section_ids=${(sectionIds || []).join(',')}`;
+    }
+    return `${BACKEND_URL}/api/export/${type}/${id}?fmt=${fmt}`;
   },
 };
