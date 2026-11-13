@@ -1,20 +1,11 @@
-# Security policy
+# Security and private data
 
-## Keep credentials out of Git
+This is a local single-user application. Bind to 127.0.0.1, open the local interface to establish an HttpOnly session, and keep the frontend/backend on the same hostname. Cross-site origins and unexpected Host headers are rejected. Databases, logs, backups and browser profiles are never mounted as public files.
 
-Use `.env.example` as the template and keep the real `.env` file local. Never commit:
+The existing credential configuration, provider router and campus login implementation are preserved by the owner's explicit request. The local Settings API still supplies existing credential fields to the authenticated Settings interface. Keep the backend off public networks. Existing provider TLS behavior is not changed by this release.
 
-- API keys for University of Macau GenAI, DeepSeek, OpenAI, or other providers.
-- UMPASS usernames or passwords.
-- JWT bearer tokens, `token` cookie values, browser cookies, or browser profile directories.
-- Uploaded lecture files, handwritten images, SQLite databases, logs, or generated exports that may contain private course material.
+Never publish `.env`, API keys, UMPASS accounts/passwords, JWT bearer/cookie tokens, browser profiles, uploaded documents, handwritten images, SQLite databases or backups. Backups contain private study data and must also stay local.
 
-The repository ignores common runtime locations, but check `git status` and review the final diff before every push.
+A release must pass both exact-value comparisons against local credential values and generic key/JWT pattern scans. Review the publication allowlist as well as .gitignore; ignored paths alone are not a security boundary.
 
-## If a credential is exposed
-
-1. Revoke or rotate the credential immediately at its provider.
-2. Remove it from every published commit and invalidate the old token.
-3. Open a private security report with the repository owner.
-
-Do not include the secret in the report. Describe its type, location, and approximate exposure time instead.
+If a secret is exposed, revoke it at the provider and remove it from published history. Do not include the value in a public issue.

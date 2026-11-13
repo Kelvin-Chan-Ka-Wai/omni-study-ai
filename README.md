@@ -1,136 +1,110 @@
 # OmniStudy AI
 
-![OmniStudy AI — Learn within your lecture scope](docs/assets/banner.svg)
+![OmniStudy AI](docs/assets/banner.svg)
 
-> A slide-scoped study workspace that turns lecture material into focused notes, timed assessments, feedback, and a living wrong-question bank.
+**A local study workspace grounded in your selected lecture slides.**
 
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/UI-React%2018-61DAFB?logo=react&logoColor=111827)](https://react.dev/)
-[![Vite](https://img.shields.io/badge/build-Vite-646CFF?logo=vite&logoColor=white)](https://vitejs.dev/)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB)
+![React](https://img.shields.io/badge/React-18-61DAFB)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688)
 
-OmniStudy AI is a full-stack academic workspace for courses such as quantitative finance, mathematics, data science, and pharmaceutical sciences. Lecture slides define the scope. Supplementary material can clarify that scope, while generated notes and assessments stay grounded in the selected slides.
+Generate notes, practice questions, review mistakes, recover an assessment after refresh, and download academic PDFs. Existing API/provider settings and campus login remain configurable locally.
 
-## What it does
+## What changed
 
-- **Slide-scoped RAG:** extracts PPTX, PDF, and Markdown slide content and uses it as the primary knowledge boundary.
-- **Study guides:** creates structured notes with definitions, formulas, worked examples, and exam pitfalls.
-- **Timed assessment modes:** section quizzes, chapter mock tests, and midterm/final-length exams with five-option MCQs, short answers, and calculations.
-- **Handwritten work:** accepts pasted screenshots or camera photos for OCR and rubric-based feedback.
-- **Wrong-question bank:** records missed concepts, generates isomorphic practice questions, and graduates a concept after three consecutive correct attempts.
-- **Voice tutor:** combines local Faster-Whisper transcription with Edge TTS playback and an interruption shortcut.
-- **Hybrid model routing:** routes requests through University of Macau GenAI, direct DeepSeek, and local Ollama. OpenAI-related settings are present, but a direct OpenAI client is not yet implemented.
-- **Academic exports:** downloads Markdown and LaTeX, and opens print-ready HTML for browser **Print → Save as PDF**.
+- **Exact section scope:** empty or foreign selections are rejected; generation and export never silently expand to every section.
+- **Source evidence:** assessments use source-slide text; exact page lists/ranges and source links replace neighboring-page guesses. Long lectures are mapped in bounded batches without silently dropping the end.
+- **Note history:** selected regeneration and deletion save earlier versions, which can be restored. Clearing the view is separate from deleting notes.
+- **Reliable wrong-question practice:** canonical response fields, five-option partial credit, preserved original mistakes and variants, review dates, and a due-only filter. A grader outage preserves the mastery streak.
+- **Recoverable assessments:** local and backend draft saving, resume from History, backend deadlines, explicit practice pauses/photo grace, and repeat-safe grading.
+- **Verified papers:** question counts, unique prompts, five options, answer keys, marks, source references, and totals are checked before a paper is saved. Failed batches do not create partial exams.
+- **Cancelable generation:** durable job status, cancellation and useful errors. Previously saved notes remain intact when generation fails or is canceled.
+- **Actual PDF downloads:** local Markdown/KaTeX rendering and Chromium printing produce PDF files without a CDN dependency.
+- **Portable study data:** backup/restore includes the study database and uploaded material, never API credentials or browser sessions. Restore creates a recovery backup first.
+- **Local access protection:** an HttpOnly session and origin checks protect API/storage access; only study-upload folders are served, not databases, logs or browser profiles.
 
-## Repository layout
-
-```text
-omni-study-ai/
-├── backend/
-│   ├── main.py                 # FastAPI entrypoint and health endpoint
-│   ├── config.py               # Environment-backed settings
-│   ├── database.py             # SQLite setup and session dependency
-│   ├── models.py               # SQLAlchemy models
-│   ├── requirements.txt        # Python runtime and test dependencies
-│   ├── routers/                # Upload, assessment, voice, export, and settings APIs
-│   ├── services/               # RAG, model routing, scoring, OCR, and export logic
-│   └── storage/                # Runtime-only uploads, database, and generated files
-├── frontend/
-│   ├── src/                    # React application and feature components
-│   ├── package.json            # Frontend scripts and dependencies
-│   └── vite.config.ts          # Vite development configuration
-├── docs/assets/                # Repository artwork
-├── requirements.txt            # Root install entrypoint
-├── .env.example                # Safe configuration template
-├── setup_mac.sh                # macOS setup helper
-└── README.md
-```
-
-Runtime data stays under `backend/storage/` and is intentionally ignored by Git. Add your own lecture files through the UI after setup; sample PDFs, databases, browser profiles, logs, and compiled frontend output are not part of this repository.
-
-## Quick start
-
-### 1. Configure the backend
+## Start locally
 
 ```bash
 python3.11 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r backend/requirements.txt
+python -m pip install -r requirements.txt
 python -m playwright install chromium
-cp .env.example .env
+npm --prefix frontend ci
+cp .env.example .env  # only for a new checkout; never replace an existing .env
 ```
 
-Open `.env` and add only the provider credentials you choose. The app can run with a local Ollama model, direct DeepSeek, or University of Macau GenAI when reachable. Model names in the template are application defaults; select models available from your provider. UMPASS username, password, browser cookies, and JWT/cookie tokens are optional local credentials and must stay on your machine.
-
-### 2. Install the frontend
-
-```bash
-npm --prefix frontend install
-```
-
-### 3. Run both services
+Fill credentials only in your own local `.env` or the existing Settings panel. Do not put real credentials into source code, screenshots, issues, or commits. No credentials are included in this repository.
 
 ```bash
 # Terminal 1
 source .venv/bin/activate
-python -m uvicorn main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+python -m uvicorn main:app --app-dir backend --host 127.0.0.1 --port 8000
 
 # Terminal 2
-npm --prefix frontend run dev
+npm --prefix frontend run dev -- --host 127.0.0.1
 ```
 
-Open `http://localhost:5173`. The API health endpoint and Swagger UI are available at `http://127.0.0.1:8000/api/health` and `http://127.0.0.1:8000/docs`.
+Open **http://127.0.0.1:5173**. Use the same hostname for frontend and backend so local session cookies work. For a single local origin, build with `npm --prefix frontend run build`, then open **http://127.0.0.1:8000** after starting the backend.
 
-For a guided macOS setup, run `./setup_mac.sh`. It creates a local virtual environment, installs backend and frontend dependencies, installs the Playwright browser, and creates `.env` from `.env.example` when needed.
+Existing users: restart the backend after updating. Additive database upgrades create a private recovery snapshot and retain existing study records. Existing credential/provider configuration and login code have not been migrated or rewritten.
 
-## Configuration guide
+## Layout
 
-| Variable group | Purpose | Required? |
-| --- | --- | --- |
-| `OPEN_WEBUI_*` | University of Macau GenAI / Open WebUI endpoint and models | No |
-| `DEEPSEEK_*` | Direct DeepSeek fallback | No |
-| `OPENAI_*` | Reserved configuration; direct routing not implemented | No |
-| `OLLAMA_*` | Local model fallback | No |
-| `UMPASS_USERNAME`, `UMPASS_PASSWORD` | Optional campus SSO recovery | No |
-| Study rule variables | Mastery threshold, streak length, exam duration | No; defaults are provided |
+```text
+backend/
+  main.py                    # Local FastAPI app and access boundaries
+  database.py, models.py     # SQLite, additive migrations and history
+  routers/                   # Chapters, exams, practice, jobs, export, backup
+  services/                  # Source scoping, scoring, existing provider routing
+  assets/katex/              # Local formula renderer, fonts and upstream license
+  tests/                     # Isolated regression checks; providers mocked
+frontend/
+  src/components/exam/       # Answers, handwriting, recoverable timer
+  src/components/layout/     # Settings, note history, backup and recovery UI
+  src/components/wrong-bank/ # Spaced practice
+  src/services/api.ts        # Session setup and API contracts
+  src/types/                 # Shared frontend types
+  src/App.tsx                # Workspace coordination
+docs/
+  assets/banner.svg          # Project artwork
+  RELEASE_NOTES.md           # Behavior changes and validation
+.env.example                 # Empty credential template
+requirements.txt             # Root dependency entrypoint
+```
 
-At least one model route must be configured for AI-generated notes and assessments. Settings can also be entered through the in-app settings panel; values are written to the local `.env` file only.
+## Credentials and provider behavior
 
-## Safety and privacy
+Configure only routes you use. The existing router supports campus GenAI, direct DeepSeek and Ollama according to its current settings. OpenAI settings are present in the existing app, but direct OpenAI fallback is not implemented by that router. A task name is not a guarantee of a model's reasoning effort; the existing integration passes no explicit reasoning-effort control.
 
-- `.env`, local databases, uploads, logs, browser profiles, and generated build artifacts are ignored by Git.
-- Do not commit API keys, UMPASS credentials, JWT bearer tokens, cookie values, or copied browser profile files.
-- If a secret was ever exposed, revoke or rotate it at the provider before continuing.
-- Review `SECURITY.md` before sharing a fork or opening an issue that contains logs.
+**Credential handling and provider routing are intentionally preserved at the owner's request.** The existing local settings API can return configured values to the authenticated local interface, and campus login has its existing behavior. Keep the service on loopback; do not deploy it as a shared public server. API keys, UMPASS credentials, JWT/cookie tokens, `.env`, browser profiles, logs, backups and all user study data are excluded from Git.
 
-## Useful shortcuts
+## Study workflow
 
-| Shortcut | Action |
-| --- | --- |
-| `Cmd + ,` | Open model routing and UMPASS settings |
-| `Cmd + V` | Paste a handwritten solution image into an answer field |
-| `Space` | Interrupt the voice tutor |
-| `Cmd + Shift + R` | Hard-refresh the frontend bundle |
+1. Upload lecture slides and optional textbook/testbank.
+2. Select exact sections. Generate or regenerate only that selection.
+3. Use **View supporting slides & note history** to verify sources or restore earlier notes.
+4. For image-only material, add a verified page transcription in the study tools. Automatic diagram understanding is not guaranteed.
+5. Open or resume an assessment. Answers autosave; the backend controls time. Practice pause is explicit.
+6. Paste/upload handwriting. Use **Read handwriting into editable answer**, correct the text, then submit.
+7. Review errors, generate twin questions, and use **Due for review only** for scheduled practice.
+8. Download selected notes as PDF/Markdown/LaTeX, or create a private study backup.
 
-## Development checks
+## Verification
 
 ```bash
-source .venv/bin/activate
-python backend/test_scoring.py
-# Optional integration demo: calls your configured AI provider and writes test data
-python backend/test_rag_and_vision.py
+python -m pip install -r backend/requirements-dev.txt
+python -m playwright install chromium
+python -m pytest backend/tests -q
 npm --prefix frontend run build
 ```
 
-The scoring script writes sample records to your local database. Run demos in a disposable checkout. AI integration demos require a configured provider and can incur usage charges.
+Tests use a temporary database and mocked model providers. The older demonstration scripts require an explicit disposable `OMNISTUDY_STORAGE_DIR`; AI integration demos can call your configured provider and incur charges.
 
-## Explore
+## Practical limits
 
-[Backend guide](backend/README.md) · [Frontend guide](frontend/README.md) · [Security and local data](SECURITY.md)
+Scope citations and structural checks support review; they do not prove that an AI answer or grade is mathematically correct. Image-only pages need verified transcription. Very large selected sections are rejected instead of silently truncated. Running generation jobs are marked interrupted after a server restart and can be retried. One backend process is supported; do not run multiple workers against this local job runner. Provider credentials, network access, quotas and model availability still determine live AI success.
 
-This is a personal local study tool. Keep the backend on loopback: settings endpoints expose local credentials, and `/storage` serves runtime files. Do not expose it to a public network. Scope constraints guide the model; review generated notes and grades for accuracy.
+[Security](SECURITY.md) · [Backend guide](backend/README.md) · [Frontend guide](frontend/README.md)
 
-## License
-
-No license has been selected yet. Add a license file before redistributing the project.
+No distribution license has been selected for the application. Bundled KaTeX retains its upstream license.

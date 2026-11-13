@@ -1,2 +1,1 @@
-# Install the backend runtime from the repository root.
 -r backend/requirements.txt
