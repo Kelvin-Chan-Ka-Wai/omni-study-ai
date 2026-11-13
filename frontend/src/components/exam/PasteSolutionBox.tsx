@@ -25,8 +25,15 @@ export const PasteSolutionBox: React.FC<Props> = ({
   onImageAttached,
   isSubmitted,
 }) => {
+  const [transcribing, setTranscribing] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(question.preview_url || null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(question.preview_url ? `${BACKEND_URL}${question.preview_url}` : question.handwritten_image_path ? `${BACKEND_URL}/storage/handwritten_snaps/${question.handwritten_image_path.split('/').pop()}` : null);
+
+  const transcribe = async () => {
+    setTranscribing(true);
+    try { const result = await OmniStudyAPI.transcribeImage(sessionId,question.id); onChangeTyped(result.transcription); }
+    finally { setTranscribing(false); }
+  };
 
   const handlePaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
     if (isSubmitted) return;
@@ -135,6 +142,7 @@ export const PasteSolutionBox: React.FC<Props> = ({
         )}
       </div>
 
+      {previewUrl && !isSubmitted && <div className="text-xs text-indigo-200 space-y-2"><button disabled={transcribing} className="underline" onClick={transcribe}>{transcribing ? 'Reading handwriting…' : 'Read handwriting into editable answer'}</button><p>Check the extracted text above before submitting. Your typed answer is used as the verified transcription.</p></div>}
       {previewUrl && (
         <div className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
