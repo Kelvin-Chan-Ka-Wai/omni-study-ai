@@ -63,6 +63,13 @@ export interface ActiveExamSession {
   max_score: number;
   provider_used?: string;
   model_used?: string;
+  status?: string;
+  deadline_at?: string;
+  is_paused?: boolean;
+  paused_remaining?: number;
+  grace_started_at?: string;
+  server_now?: string;
+  draft_answers?: { question_id: number; user_answer: string | string[]; corrected_transcription?: string }[];
   questions: AssessmentQuestion[];
 }
 
@@ -83,4 +90,7 @@ export interface WrongQuestionItem {
   mutation_generation: number;
   status: 'active' | 'graduated';
   last_reviewed_at: string;
+  next_review_at?: string;
+  required_streak?: number;
+  original_question?: { prompt_markdown: string; options_json?: string; correct_answer: string };
 }
