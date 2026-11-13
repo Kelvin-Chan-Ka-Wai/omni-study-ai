@@ -323,7 +323,8 @@ export const HandsFreeVoiceOrb: React.FC<Props> = ({
         (status === 'speaking' || status === 'thinking' || status === 'transcribing') &&
         e.code === 'Space' &&
         document.activeElement?.tagName !== 'INPUT' &&
-        document.activeElement?.tagName !== 'TEXTAREA'
+        document.activeElement?.tagName !== 'TEXTAREA' &&
+        !(document.activeElement as HTMLElement)?.isContentEditable
       ) {
         e.preventDefault();
         interruptAiAndListenNow();
