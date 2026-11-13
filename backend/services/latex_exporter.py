@@ -21,115 +21,26 @@ class AcademicExporter:
         Generates a standalone, publication-quality HTML5 + KaTeX + Marked document
         that automatically renders all LaTeX formulas and opens macOS Save-as-PDF dialog.
         """
-        escaped_json_md = json.dumps(markdown_body)
-        safe_title = html.escape(title)
-        safe_sub = html.escape(subtitle)
-        return f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8" />
-  <title>{safe_title}</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" />
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-  <style>
-    @page {{ size: A4; margin: 18mm; }}
-    body {{
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Georgia, serif;
-      color: #0f172a;
-      background: #ffffff;
-      line-height: 1.75;
-      max-width: 820px;
-      margin: 0 auto;
-      padding: 24px;
-    }}
-    .print-toolbar {{
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      background: #f1f5f9;
-      border: 1px solid #cbd5e1;
-      border-radius: 10px;
-      padding: 12px 18px;
-      margin-bottom: 24px;
-    }}
-    .print-btn {{
-      background: #4f46e5;
-      color: white;
-      border: none;
-      border-radius: 8px;
-      padding: 8px 16px;
-      font-weight: 600;
-      cursor: pointer;
-    }}
-    @media print {{
-      .print-toolbar {{ display: none !important; }}
-      body {{ padding: 0; max-width: 100%; }}
-    }}
-    h1 {{ font-size: 22pt; margin-bottom: 4px; color: #1e1b4b; border-bottom: 2px solid #e2e8f0; padding-bottom: 8px; }}
-    h2 {{ font-size: 15pt; margin-top: 28px; color: #312e81; background: #f8fafc; padding: 8px 12px; border-left: 4px solid #4f46e5; border-radius: 4px; }}
-    h3 {{ font-size: 12.5pt; margin-top: 20px; color: #1e293b; }}
-    p, li {{ font-size: 10.5pt; margin-bottom: 8px; }}
-    ul, ol {{ padding-left: 22px; margin-bottom: 14px; }}
-    blockquote {{
-      border-left: 4px solid #6366f1;
-      background: #f8fafc;
-      margin: 14px 0;
-      padding: 10px 16px;
-      border-radius: 0 8px 8px 0;
-    }}
-    .katex-display {{
-      margin: 16px 0 !important;
-      padding: 10px 14px;
-      background: #f8fafc;
-      border: 1px solid #e2e8f0;
-      border-radius: 8px;
-      overflow-x: auto;
-    }}
-    hr {{ border: none; border-top: 1px solid #e2e8f0; margin: 24px 0; }}
-  </style>
-</head>
-<body>
-  <div class="print-toolbar">
-    <div>
-      <strong>{safe_title}</strong>
-      <div style="font-size: 12px; color: #475569;">{safe_sub} • Select <b>"Save as PDF"</b> in the destination dropdown</div>
-    </div>
-    <button class="print-btn" onclick="window.print()">Download / Save as PDF (Cmd + P)</button>
-  </div>
-  <div id="content"></div>
-  <script>
-    const rawMd = {escaped_json_md};
-    // Protect LaTeX blocks before Marked parses Markdown
-    const mathBlocks = [];
-    const protectedMd = rawMd
-      .replace(/\\$\\$([\\s\\S]*?)\\$\\$/g, (m) => {{
-        mathBlocks.push(m);
-        return `@@MATH_BLOCK_${{mathBlocks.length - 1}}@@`;
-      }})
-      .replace(/\\$([^$\\n]+?)\\$/g, (m) => {{
-        mathBlocks.push(m);
-        return `@@MATH_BLOCK_${{mathBlocks.length - 1}}@@`;
-      }});
-
-    let htmlOut = marked.parse(protectedMd);
-    htmlOut = htmlOut.replace(/@@MATH_BLOCK_(\\d+)@@/g, (_, idx) => mathBlocks[Number(idx)]);
-    const container = document.getElementById('content');
-    container.innerHTML = htmlOut;
-
-    renderMathInElement(container, {{
-      delimiters: [
-        {{ left: '$$', right: '$$', display: true }},
-        {{ left: '$', right: '$', display: false }}
-      ],
-      throwOnError: false
-    }});
-
-    setTimeout(() => {{ window.print(); }}, 450);
-  </script>
-</body>
-</html>"""
+        from markdown_it import MarkdownIt
+        # Disable raw HTML and remote images; preserve formulas before Markdown processing.
+        math = []
+        def protect(match):
+            math.append(match.group(0))
+            return f"OMNIMATHPLACEHOLDER{len(math)-1}END"
+        protected = re.sub(r"\$\$[\s\S]*?\$\$|\$[^$\n]+\$", protect, markdown_body)
+        parser = MarkdownIt("commonmark", {"html": False})
+        parser.disable("image")
+        rendered = parser.render(protected)
+        for index, expression in enumerate(math):
+            rendered = rendered.replace(f"OMNIMATHPLACEHOLDER{index}END", html.escape(expression))
+        title, subtitle = html.escape(title), html.escape(subtitle)
+        return f"""<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>
+<link rel="stylesheet" href="https://assets.omnistudy.local/katex.min.css">
+<script src="https://assets.omnistudy.local/katex.min.js"></script>
+<script src="https://assets.omnistudy.local/auto-render.min.js"></script>
+<style>@page{{size:A4;margin:18mm}}body{{font:11pt Georgia,serif;color:#16213a;line-height:1.6}}h1,h2,h3{{font-family:Arial,sans-serif;break-after:avoid}}h1{{color:#3730a3}}h2{{border-left:4px solid #6366f1;padding-left:12px}}pre{{white-space:pre-wrap}}.katex-display{{overflow:visible}}blockquote{{border-left:3px solid #a5b4fc;padding-left:12px}}</style>
+</head><body><h1>{title}</h1><p>{subtitle}</p><main id="content">{rendered}</main>
+<script>renderMathInElement(document.getElementById('content'),{{delimiters:[{{left:'$$',right:'$$',display:true}},{{left:'$',right:'$',display:false}}],throwOnError:false}});window.formulasReady=true;</script></body></html>"""
 
     @classmethod
     def export_chapter_study_guide(

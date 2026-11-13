@@ -62,7 +62,7 @@ class ScoringEngine:
             raw_str = ",".join(str(x) for x in raw_options)
         else:
             raw_str = str(raw_options)
-        letters = re.findall(r"[A-Ea-e]", raw_str.upper())
+        letters = re.findall(r"(?<![A-Z])[A-E](?![A-Z])", raw_str.upper())
         return set(letters)
 
     @classmethod
@@ -137,6 +137,7 @@ class ScoringEngine:
         db: Session,
         chapter_id: int,
         question_record: QuestionRecord,
+        commit: bool = True,
     ) -> WrongQuestionBank | None:
         is_wrong = cls.should_collect_as_wrong(
             question_record.question_type,
@@ -164,7 +165,7 @@ class ScoringEngine:
             existing.consecutive_correct_count = 0
             existing.status = "active"
             existing.last_reviewed_at = datetime.now(timezone.utc)
-            db.commit()
+            db.commit() if commit else db.flush()
             db.refresh(existing)
             return existing
 
@@ -185,7 +186,7 @@ class ScoringEngine:
             status="active",
         )
         db.add(wrong_entry)
-        db.commit()
+        db.commit() if commit else db.flush()
         db.refresh(wrong_entry)
         return wrong_entry
 
@@ -229,6 +230,7 @@ class ScoringEngine:
         cls,
         db: Session,
         session_id: int,
+        commit: bool = True,
     ) -> dict:
         exam = db.query(ExamSession).filter(ExamSession.id == session_id).first()
         if not exam:
@@ -281,7 +283,7 @@ class ScoringEngine:
                 (mastered_count / len(all_sections)) * 100.0, 1
             )
 
-        db.commit()
+        db.commit() if commit else db.flush()
         return {
             "session_id": exam.id,
             "total_score": exam.total_score,

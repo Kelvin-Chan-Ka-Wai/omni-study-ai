@@ -93,7 +93,7 @@ class VisionSolutionGrader:
             try:
                 ocr_info = await cls.transcribe_handwritten_image(handwritten_image_path)
             except Exception as e:
-                ocr_info["transcribed_latex"] = f"(Image OCR unavailable: {e})"
+                raise RuntimeError("Image transcription unavailable. Correct the transcription or retry; no grade recorded.") from e
 
         combined_student_work = "\n\n".join(
             part
@@ -158,7 +158,11 @@ Evaluate the student's work and return a JSON object with these exact keys:
             raw = fence.group(1).strip()
         graded = json.loads(raw)
 
-        score = float(graded.get("score_awarded", 0.0))
+        import math
+        if not isinstance(graded, dict) or "score_awarded" not in graded:
+            raise ValueError("Invalid grading response")
+        score = float(graded["score_awarded"])
+        if not math.isfinite(score): raise ValueError("Invalid score")
         score = max(0.0, min(round(score, 2), float(max_points)))
 
         return {
