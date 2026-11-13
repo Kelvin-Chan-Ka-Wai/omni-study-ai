@@ -65,6 +65,11 @@ class ExamSession(Base):
     accuracy = Column(Float, default=0.0)
     started_at = Column(DateTime, default=utc_now)
     completed_at = Column(DateTime, nullable=True)
+    draft_json = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)
+    deadline_at = Column(String(64), nullable=True)
+    paused_remaining = Column(Float, nullable=True)
+    grace_started_at = Column(String(64), nullable=True)
 
     chapter = relationship("Chapter", back_populates="exam_sessions")
     questions = relationship("QuestionRecord", back_populates="session", cascade="all, delete-orphan")
@@ -110,8 +115,39 @@ class WrongQuestionBank(Base):
     consecutive_correct_count = Column(Integer, default=0)
     total_review_attempts = Column(Integer, default=0)
     mutation_generation = Column(Integer, default=0)
+    original_json = Column(Text, nullable=True)
+    variant_history_json = Column(Text, nullable=True)
+    next_review_at = Column(DateTime, nullable=True)
     status = Column(String(32), default="active")
     created_at = Column(DateTime, default=utc_now)
     last_reviewed_at = Column(DateTime, default=utc_now)
 
     chapter = relationship("Chapter", back_populates="wrong_questions")
+
+
+class NoteVersion(Base):
+    __tablename__ = "note_versions"
+    id = Column(Integer, primary_key=True)
+    section_id = Column(Integer, ForeignKey("chapter_sections.id", ondelete="CASCADE"), nullable=False)
+    content = Column(Text, nullable=False)
+    reason = Column(String(32), nullable=False)
+    created_at = Column(DateTime, default=utc_now)
+
+
+class SlideTranscription(Base):
+    __tablename__ = "slide_transcriptions"
+    id = Column(Integer, primary_key=True)
+    chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False)
+    page = Column(Integer, nullable=False)
+    text = Column(Text, nullable=False)
+
+
+class GenerationJob(Base):
+    __tablename__ = 'generation_jobs'
+    id = Column(String(64), primary_key=True)
+    chapter_id = Column(Integer, ForeignKey('chapters.id', ondelete='CASCADE'), nullable=False)
+    kind = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False)
+    message = Column(Text, nullable=True)
+    result_json = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=utc_now)

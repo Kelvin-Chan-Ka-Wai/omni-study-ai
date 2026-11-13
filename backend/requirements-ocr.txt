@@ -1,0 +1,2 @@
+# Optional heavyweight local handwritten LaTeX OCR fallback
+pix2tex==0.1.2

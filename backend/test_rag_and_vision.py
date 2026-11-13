@@ -57,4 +57,7 @@ async def main():
     print(f" -> Error Diagnosis: {grade_res['error_diagnosis']}")
 
 if __name__ == "__main__":
+    import os
+    if not os.environ.get("OMNISTUDY_STORAGE_DIR"):
+        raise SystemExit("Set OMNISTUDY_STORAGE_DIR to a disposable folder before running this demonstration.")
     asyncio.run(main())

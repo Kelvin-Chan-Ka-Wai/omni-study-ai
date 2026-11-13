@@ -70,4 +70,7 @@ def run_tests():
     db.close()
 
 if __name__ == "__main__":
+    import os
+    if not os.environ.get("OMNISTUDY_STORAGE_DIR"):
+        raise SystemExit("Set OMNISTUDY_STORAGE_DIR to a disposable folder before running this demonstration.")
     run_tests()
