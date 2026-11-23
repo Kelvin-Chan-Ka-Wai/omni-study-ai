@@ -54,6 +54,18 @@ def test_empty_and_foreign_selection_cannot_clear_or_regenerate(client,seeded):
         assert client.get(f'/api/export/chapter/{cid}',params={'fmt':'md','section_ids':selection}).status_code==400
 
 
+def test_job_rejects_a_deleted_chapter_or_stale_section(client, seeded):
+    chapter, sections = seeded
+    url = '/api/jobs'
+    payload = {'kind': 'notes', 'chapter_id': chapter, 'section_ids': [999999]}
+    assert client.post(url, json=payload).status_code == 400
+    assert client.delete(f'/api/chapters/{chapter}').status_code == 200
+    payload['section_ids'] = sections
+    missing = client.post(url, json=payload)
+    assert missing.status_code == 404
+    assert 'Reload the workspace' in missing.json()['detail']
+
+
 def test_selected_export_clear_restore(client,seeded):
     cid,ids=seeded
     export=client.get(f'/api/export/chapter/{cid}',params={'fmt':'md','section_ids':str(ids[0])})
@@ -151,8 +163,15 @@ def test_incomplete_paper_rejected():
 
 
 def test_preserved_credential_files():
-    backup=Path('/private/tmp/omnistudy-before-improvements')
-    if not backup.exists():pytest.skip('Local credential preservation check only')
-    root=Path(__file__).resolve().parents[2]
-    for rel in ('backend/config.py','backend/services/llm_harness.py','backend/services/um_token_keeper.py','backend/routers/settings_router.py','frontend/src/components/layout/SettingsModal.tsx'):
-        assert (root/rel).read_bytes()==(backup/rel).read_bytes(),rel
+    import os
+    candidate = os.environ.get('OMNISTUDY_CREDENTIAL_FIXTURE_ROOT')
+    if not candidate:
+        pytest.skip('Set OMNISTUDY_CREDENTIAL_FIXTURE_ROOT to a full local baseline to compare credential integration files.')
+    baseline = Path(candidate)
+    root = Path(__file__).resolve().parents[2]
+    for rel in ('backend/config.py', 'backend/services/llm_harness.py', 'backend/services/um_token_keeper.py',
+                'backend/routers/settings_router.py', 'frontend/src/components/layout/SettingsModal.tsx'):
+        if not (baseline / rel).is_file():
+            pytest.fail(f'Local baseline is missing {rel}.')
+        if (root / rel).read_bytes() != (baseline / rel).read_bytes():
+            pytest.fail(f'Credential integration file differs from the local baseline: {rel}.')
