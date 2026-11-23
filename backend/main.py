@@ -1,13 +1,14 @@
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from config import settings
 from database import STORAGE_DIR, init_db
 from routers import assessment, export, ingestion, settings_router, voice, wrong_bank
+from services.documents import DocumentReadError
 from services.llm_harness import HybridLLMHarness
 from routers import jobs, backup
 from security import LocalAccessMiddleware, ALLOWED_ORIGINS
@@ -26,6 +27,11 @@ app = FastAPI(
     version="2.0.0",
     lifespan=lifespan,
 )
+
+@app.exception_handler(DocumentReadError)
+async def invalid_study_document(_request: Request, error: DocumentReadError):
+    return JSONResponse({"detail": str(error)}, status_code=422)
+
 
 app.add_middleware(
     CORSMiddleware,

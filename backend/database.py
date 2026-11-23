@@ -34,6 +34,8 @@ def init_db() -> None:
         backup = STORAGE_DIR / "backups" / ("before-upgrade-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".db")
         with engine.connect() as connection:
             additions = {
+                "question_records": {"testbank_reference": "TEXT"},
+                "chapter_sections": {"is_archived": "BOOLEAN NOT NULL DEFAULT 0"},
                 "exam_sessions": {"draft_json": "TEXT", "result_json": "TEXT", "deadline_at": "TEXT", "paused_remaining": "FLOAT", "grace_started_at": "TEXT"},
                 "wrong_question_bank": {"original_json": "TEXT", "variant_history_json": "TEXT", "next_review_at": "DATETIME"},
             }
