@@ -2,11 +2,12 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from database import SessionLocal
-from models import GenerationJob
+from models import Chapter, GenerationJob
+from services.scope import selected_sections
+from services.scoring_engine import ScoringEngine
 from routers.ingestion import regenerate_structured_study_notes, RegenerateNotesRequest
 from routers.assessment import generate_assessment, GenerateAssessmentRequest
 
@@ -52,6 +53,11 @@ async def create_job(req: JobRequest):
     if req.kind not in ('notes', 'assessment') or not req.section_ids:
         raise HTTPException(400, 'Choose a generation type and at least one section')
     with SessionLocal() as db:
+        if not db.get(Chapter, req.chapter_id):
+            raise HTTPException(404, 'Chapter not found. Reload the workspace to see your saved chapters.')
+        selected_sections(db, req.chapter_id, req.section_ids)
+        if req.kind == 'assessment' and req.mode not in ScoringEngine.EXAM_BLUEPRINTS:
+            raise HTTPException(400, 'Choose a supported assessment mode.')
         if db.query(GenerationJob).filter(GenerationJob.chapter_id == req.chapter_id, GenerationJob.status.in_(['queued', 'running'])).first():
             raise HTTPException(409, 'Generation is already running for this chapter')
         job_id = uuid.uuid4().hex

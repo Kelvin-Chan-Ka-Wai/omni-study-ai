@@ -26,7 +26,7 @@ async def export_chapter_notes(
         ids = [int(x.strip()) for x in section_ids.split(",")] if section_ids else []
     except ValueError:
         raise HTTPException(400, "Invalid section selection")
-    sections = selected_sections(db, chapter_id, ids, all_sections)
+    sections = selected_sections(db, chapter_id, ids, all_sections, include_archived=True)
     content = AcademicExporter.export_chapter_study_guide(chapter, sections, fmt=fmt)
     if fmt == "pdf":
         return Response(content=await render_pdf(content), media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="omnistudy.pdf"'})

@@ -10,6 +10,8 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import STORAGE_DIR, get_db
 from models import Chapter, ChapterSection, ExamSession, QuestionRecord, SlideTranscription
+from services.documents import resolve_local_upload
+from services.slide_outline import review_slides
 from services.scope import selected_sections
 from services.scoring_engine import ScoringEngine
 from services.slide_scope_rag import SlideScopeRAG
@@ -63,21 +65,20 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
     if req.mode not in ScoringEngine.EXAM_BLUEPRINTS:
         raise HTTPException(400, "Choose a supported assessment mode.")
     sections = selected_sections(db, req.chapter_id, req.section_ids, req.all_sections)
-    source_path = (STORAGE_DIR / chapter.slide_file_path.replace("/storage/", "", 1)).resolve() if chapter.slide_file_path else None
-    if not source_path or not source_path.is_relative_to(STORAGE_DIR) or not source_path.is_file():
+    source_path = resolve_local_upload(STORAGE_DIR, chapter.slide_file_path)
+    if not source_path:
         raise HTTPException(400, "Source slides are missing. Upload the lecture again.")
     slides = SlideScopeRAG.extract_slides_text(source_path)
     overrides = {r.page: r.text for r in db.query(SlideTranscription).filter_by(chapter_id=chapter.id)}
-    slides = [{**slide, "text": overrides.get(slide["slide_number"], slide["text"])} for slide in slides]
-    scoped_dicts = [{"id": sec.id, "section_code": sec.section_code, "section_title": sec.section_title,
-        "slide_pages": sec.slide_pages, "source_text": SlideScopeRAG._filter_slides_for_page_range(slides, sec.slide_pages)} for sec in sections]
+    slides = review_slides([{**slide, "text": overrides.get(slide["slide_number"], slide["text"]),
+                             "verified": slide["slide_number"] in overrides} for slide in slides])
+    scoped_dicts = []
+    for sec in sections:
+        page_ref, evidence = SlideScopeRAG.scoped_slide_evidence(slides, sec.slide_pages)
+        scoped_dicts.append({"id": sec.id, "section_code": sec.section_code, "section_title": sec.section_title,
+                             "slide_pages": page_ref, "source_text": evidence})
 
-    tb_path = None
-    if getattr(chapter, "testbank_file_path", None):
-        clean_rel = chapter.testbank_file_path.replace("/storage/", "", 1).lstrip("/")
-        cand = STORAGE_DIR / clean_rel
-        if cand.exists():
-            tb_path = cand
+    tb_path = resolve_local_upload(STORAGE_DIR, chapter.testbank_file_path)
 
     generated = await SlideScopeRAG.generate_scoped_assessment(
         course_name=chapter.course_name,
@@ -119,6 +120,7 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
             question_type=q.get("question_type", "mcq_single"),
             core_concept_tag=q.get("core_concept_tag", "Slide Concept"),
             slide_reference=q.get("slide_reference", "Lecture Slides"),
+            testbank_reference=q.get('testbank_reference'),
             prompt_markdown=q.get("prompt_markdown", ""),
             options_json=opts_json,
             correct_answer=str(q.get("correct_answer", "")),
@@ -128,11 +130,9 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
         db.add(q_rec)
         saved_questions.append(q_rec)
 
-    db.commit()
-    for qr in saved_questions:
-        db.refresh(qr)
-
+    db.flush()
     result = serialize_session(exam, saved_questions)
+    db.commit()
     result.update(provider_used=generated["provider_used"], model_used=generated["model_used"])
     return result
 
@@ -168,6 +168,7 @@ def serialize_session(exam, questions):
         "draft_answers": json.loads(exam.draft_json or "[]"),
         "questions": [{"id": q.id, "section_id": q.section_id, "question_type": q.question_type,
             "core_concept_tag": q.core_concept_tag, "slide_reference": q.slide_reference,
+            "testbank_reference": q.testbank_reference,
             "prompt_markdown": q.prompt_markdown, "options": json.loads(q.options_json) if q.options_json else None,
             "max_points": q.max_points, "handwritten_image_path": q.handwritten_image_path,
             **({"correct_answer": q.correct_answer, "user_answer": q.user_answer, "score_awarded": q.score_awarded,
