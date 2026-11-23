@@ -10,6 +10,14 @@
 
 Generate notes, practice questions, review mistakes, recover an assessment after refresh, and download academic PDFs. Existing API/provider settings and campus login remain configurable locally.
 
+## Generating notes and papers
+
+Select the sections you want, then choose **Generate Ticked Sections** or **Generate Quiz/Exam**. Notes teach from the selected slides and use matching textbook passages for explanations and page references. Opening slides, closing slides, and publisher credits are filtered from new chapter outlines. Textbooks can be up to 200 MB; slides and testbanks can be up to 50 MB each.
+
+Note generation targets **two minutes**. Several sections can be written at once, sharing a 105-second AI budget that includes waiting for a generation slot. On a slow response, completed lessons are saved. A section that already has notes keeps them; an empty section gets a clearly labeled reading guide with its slides and relevant textbook excerpts where available. Regenerate that section if you want a fresh AI explanation. A guide is not a worked AI lesson. Timing can vary with the machine, document, and provider.
+
+Quizzes, mock tests, midterms, and finals use relevant uploaded testbank questions first. The app generates missing questions in parallel and checks the selected scope, question counts, answer keys, and total marks before saving a paper. The most recently used textbook index and question banks are reused in memory; replacing the source file invalidates its cached entry.
+
 ## What changed
 
 - **Exact section scope:** empty or foreign selections are rejected; generation and export never silently expand to every section.
