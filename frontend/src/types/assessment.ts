@@ -32,7 +32,16 @@ export interface ChapterSummary {
   progress_percentage: number;
   active_wrong_count?: number;
   sections: SlideSection[];
+  archived_sections?: SlideSection[];
   study_history?: StudyHistoryItem[];
+}
+
+export interface SlideOutline {
+  sections: Pick<SlideSection, 'section_code' | 'section_title' | 'slide_pages'>[];
+  excluded: { page: number; title: string; reason: string }[];
+  visual_pages: number[];
+  file_url: string;
+  can_apply: boolean;
 }
 
 export interface AssessmentQuestion {
@@ -41,6 +50,7 @@ export interface AssessmentQuestion {
   question_type: 'mcq_single' | 'mcq_multi' | 'short_answer' | 'calculation';
   core_concept_tag: string;
   slide_reference: string;
+  testbank_reference?: string | null;
   prompt_markdown: string;
   options?: Record<'A' | 'B' | 'C' | 'D' | 'E', string> | null;
   max_points: number;
