@@ -24,7 +24,7 @@ import {
   ChapterSummary,
   WrongQuestionItem,
 } from './types/assessment';
-import { BACKEND_URL, OmniStudyAPI } from './services/api';
+import { BACKEND_URL, OmniStudyAPI, requestError } from './services/api';
 import { SectionTools, WorkspaceTools } from './components/layout/StudyTools';
 import { ExamHeaderTimer } from './components/exam/ExamHeaderTimer';
 import { McqFiveOptionCard } from './components/exam/McqFiveOptionCard';
@@ -32,6 +32,11 @@ import { PasteSolutionBox } from './components/exam/PasteSolutionBox';
 import { WrongQuestionCard } from './components/wrong-bank/WrongQuestionCard';
 import { HandsFreeVoiceOrb } from './components/voice/HandsFreeVoiceOrb';
 import { SettingsModal } from './components/layout/SettingsModal';
+
+// Progress timers and exam autosaves must not typeset unchanged notes again.
+const NoteMarkdown = React.memo(function NoteMarkdown({ text }: { text: string }) {
+  return <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}>{text}</ReactMarkdown>;
+});
 
 export function App() {
   const [chapters, setChapters] = useState<ChapterSummary[]>([]);
@@ -49,6 +54,10 @@ export function App() {
   const [textbookFile, setTextbookFile] = useState<File | null>(null);
   const [testbankFile, setTestbankFile] = useState<File | null>(null);
   const [onboarding, setOnboarding] = useState(false);
+  const [importError, setImportError] = useState('');
+  const [documentNotice, setDocumentNotice] = useState<{ chapterId: number; message: string; warnings: string[] } | null>(null);
+  const [attachingTestbank, setAttachingTestbank] = useState(false);
+  const chapterRequest = useRef(0);
 
   // Note Regeneration & Cleaning state
   const [regeneratingNotes, setRegeneratingNotes] = useState(false);
@@ -109,38 +118,44 @@ export function App() {
   }, [generatingExam]);
 
   const refreshChapters = async (selectId?: number, preserveSelection?: number[]) => {
+    const request = ++chapterRequest.current;
     const list = await OmniStudyAPI.listChapters();
+    if (request !== chapterRequest.current) return;
     setChapters(list);
     if (list.length === 0) {
       setActiveChapter(null);
+      setSelectedSectionIds([]);
       setShowOnboardModal(true);
       return;
     }
     const targetId = selectId ?? activeChapter?.id ?? list[0].id;
     const exists = list.some((c) => c.id === targetId) ? targetId : list[0].id;
     const detail = await OmniStudyAPI.getChapterDetail(exists);
+    if (request !== chapterRequest.current) return;
     setActiveChapter(detail);
-    if (preserveSelection !== undefined) {
-      setSelectedSectionIds(preserveSelection);
-    } else {
-      setSelectedSectionIds(detail.sections.map((s) => s.id));
-    }
-    try {
-      const wrongs = await OmniStudyAPI.listWrongQuestions(exists, wrongFilter);
-      setWrongItems(wrongs); setWrongError('');
-    } catch { setWrongError('Could not load your mistakes. Retry loading.'); }
+    const availableIds = detail.sections.map((section) => section.id);
+    setSelectedSectionIds(preserveSelection !== undefined && exists === targetId
+      ? preserveSelection.filter((id) => availableIds.includes(id))
+      : availableIds);
   };
 
   useEffect(() => {
     OmniStudyAPI.getHealth().then(setHealth).catch(() => {});
-    refreshChapters();
+    refreshChapters().catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (activeChapter) {
-      OmniStudyAPI.listWrongQuestions(activeChapter.id, wrongFilter).then((w) => { setWrongItems(w); setWrongError(''); }).catch(() => setWrongError('Could not load mistakes. Please retry.'));
-    }
-  }, [wrongFilter, activeChapter?.id]);
+    setWrongItems([]);
+    setWrongError('');
+    if (!activeChapter) return;
+    let canceled = false;
+    OmniStudyAPI.listWrongQuestions(activeChapter.id, wrongFilter).then((items) => {
+      if (!canceled) setWrongItems(items);
+    }).catch(() => {
+      if (!canceled) setWrongError('Could not load mistakes. Please retry.');
+    });
+    return () => { canceled = true; };
+  }, [wrongFilter, activeChapter]);
 
   useEffect(() => {
     const id = activeChapter?.id;
@@ -189,11 +204,28 @@ export function App() {
     await OmniStudyAPI.deleteChapter(chapterId);
     const remaining = chapters.filter((c) => c.id !== chapterId);
     if (remaining.length === 0) {
+      ++chapterRequest.current;
       setChapters([]);
       setActiveChapter(null);
+      setSelectedSectionIds([]);
       setShowOnboardModal(true);
     } else {
       await refreshChapters(remaining[0].id);
+    }
+  };
+
+  const generateNotes = async (chapterId: number, ids: number[]) => {
+    const result = await OmniStudyAPI.regenerateChapterNotes(chapterId, ids);
+    const guides = result.source_guide_section_ids?.length || 0;
+    const kept = result.kept_section_ids?.length || 0;
+    if (guides || kept) {
+      setDocumentNotice({ chapterId, message: 'Some AI lessons reached the time limit.', warnings: [
+        ...(guides ? [`${guides} section(s) received a reading guide with source excerpts.`] : []),
+        ...(kept ? [`${kept} section(s) kept their existing notes.`] : []),
+        'You can regenerate an individual section for a new AI lesson.',
+      ] });
+    } else {
+      setDocumentNotice(null);
     }
   };
 
@@ -215,15 +247,16 @@ export function App() {
 
   const handleOnboardSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!slideFile || !courseName || !chapterTitle) return;
+    if (!slideFile || onboarding) return;
+    if (!courseName.trim() || !chapterTitle.trim()) {
+      setImportError('Enter both the course name and chapter title.');
+      return;
+    }
+    setImportError('');
     setOnboarding(true);
     try {
       const created = await OmniStudyAPI.onboardChapter(
-        courseName,
-        chapterTitle,
-        slideFile,
-        textbookFile,
-        testbankFile
+        courseName.trim(), chapterTitle.trim(), slideFile, textbookFile, testbankFile
       );
       setShowOnboardModal(false);
       setCourseName('');
@@ -231,8 +264,19 @@ export function App() {
       setSlideFile(null);
       setTextbookFile(null);
       setTestbankFile(null);
-      await refreshChapters(created.chapter_id);
+      setDocumentNotice({
+        chapterId: created.chapter_id,
+        message: `Imported ${created.total_slides_parsed} source page(s). Select sections to generate notes when you’re ready.`,
+        warnings: created.warnings ?? [],
+      });
       setActiveTab('study');
+      try {
+        await refreshChapters(created.chapter_id);
+      } catch {
+        window.dispatchEvent(new CustomEvent('omnistudy-error', { detail: 'The chapter was saved. Reload the workspace to open it if it does not appear.' }));
+      }
+    } catch (error) {
+      setImportError(requestError(error, 'Could not import the chapter. Try again.'));
     } finally {
       setOnboarding(false);
     }
@@ -342,7 +386,7 @@ export function App() {
             <span className="font-bold tracking-tight text-white">OmniStudy AI</span>
           </div>
           <button
-            onClick={() => setShowOnboardModal(true)}
+            onClick={() => { setImportError(''); setShowOnboardModal(true); }}
             className="flex items-center gap-1 rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-indigo-500 transition"
           >
             <PlusCircle className="h-3.5 w-3.5" />
@@ -676,12 +720,7 @@ export function App() {
                         <span className="text-[11px] text-slate-400">{sec.slide_pages}</span>
                       </div>
                       <div className="study-markdown prose prose-invert max-w-none text-xs text-slate-300">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkMath]}
-                          rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-                        >
-                          {sec.extracted_study_notes || '_Note space is clean. Click Generate Ticked Sections to write notes._'}
-                        </ReactMarkdown>
+                        <NoteMarkdown text={sec.extracted_study_notes || '_Note space is clean. Click Generate Ticked Sections to write notes._'} />
                       </div>
                     </div>
                   ))}
@@ -737,7 +776,7 @@ export function App() {
                         setRegeneratingNotes(true);
                         setRegenModeLabel('selected');
                         try {
-                          await OmniStudyAPI.regenerateChapterNotes(activeChapter.id, keepSelected);
+                          await generateNotes(activeChapter.id, keepSelected);
                           await refreshChapters(activeChapter.id, keepSelected);
                         } finally {
                           setRegeneratingNotes(false);
@@ -763,7 +802,7 @@ export function App() {
                         setRegeneratingNotes(true);
                         setRegenModeLabel('all');
                         try {
-                          await OmniStudyAPI.regenerateChapterNotes(activeChapter.id, allIds);
+                          await generateNotes(activeChapter.id, allIds);
                           await refreshChapters(activeChapter.id, allIds);
                         } finally {
                           setRegeneratingNotes(false);
@@ -796,19 +835,25 @@ export function App() {
                     <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-purple-500/40 bg-purple-500/15 px-3 py-1.5 text-xs font-semibold text-purple-200 hover:bg-purple-500/25 transition">
                       <FileUp className="h-3.5 w-3.5 text-purple-300" />
                       <span>
-                        {activeChapter.testbank_file_path
-                          ? 'Update Testbank'
-                          : '+ Attach Testbank'}
+                        {attachingTestbank ? 'Attaching…' : activeChapter.testbank_file_path
+                          ? 'Update Testbank' : '+ Attach Testbank'}
                       </span>
                       <input
                         type="file"
                         accept=".pdf,.pptx,.md,.txt"
+                        disabled={attachingTestbank}
                         className="hidden"
                         onChange={async (e) => {
                           const f = e.target.files?.[0];
-                          if (!f) return;
-                          await OmniStudyAPI.uploadChapterTestbank(activeChapter.id, f);
-                          await refreshChapters(activeChapter.id, selectedSectionIds);
+                          e.currentTarget.value = '';
+                          if (!f || attachingTestbank) return;
+                          setAttachingTestbank(true);
+                          try {
+                            const saved = await OmniStudyAPI.uploadChapterTestbank(activeChapter.id, f);
+                            setDocumentNotice({ chapterId: activeChapter.id, message: 'Testbank saved.', warnings: saved.warnings ?? [] });
+                            await refreshChapters(activeChapter.id, selectedSectionIds);
+                          } catch { /* The request error banner shows what to fix. */ }
+                          finally { setAttachingTestbank(false); }
                         }}
                       />
                     </label>
@@ -836,7 +881,32 @@ export function App() {
                 </div>
 
                 {/* ONLY render the sections that the user has ticked! */}
-                <WorkspaceTools chapterId={activeChapter.id} refresh={() => refreshChapters(activeChapter.id, selectedSectionIds)} />
+                {documentNotice?.chapterId === activeChapter.id && (
+                  <div role="status" className="mb-3 rounded-xl border border-indigo-500/40 bg-indigo-950/60 px-4 py-3 text-sm text-indigo-100">
+                    <button type="button" className="float-right ml-4 underline" onClick={() => setDocumentNotice(null)}>Dismiss</button>
+                    <p>{documentNotice.message}</p>
+                    {documentNotice.warnings.map((warning) => <p key={warning} className="mt-1 text-amber-200">{warning}</p>)}
+                  </div>
+                )}
+                <WorkspaceTools key={activeChapter.id} chapterId={activeChapter.id} refresh={() => refreshChapters(activeChapter.id, selectedSectionIds)} refreshScope={() => refreshChapters(activeChapter.id)} />
+                {!!activeChapter.archived_sections?.length && (
+                  <details className="mb-3 rounded-xl border border-slate-800 bg-slate-900/70 p-4">
+                    <summary className="cursor-pointer text-sm font-semibold text-indigo-200">Previously generated notes ({activeChapter.archived_sections.length})</summary>
+                    <p className="mt-2 text-xs text-slate-400">These notes use the earlier slide ranges. They are kept for reference and are separate from the reviewed sections.</p>
+                    {activeChapter.archived_sections.map(sec => (
+                      <details key={sec.id} className="mt-3 rounded-lg border border-slate-800 bg-slate-950/50 p-3">
+                        <summary className="cursor-pointer text-sm font-semibold text-slate-200">{sec.section_code} · {sec.slide_pages}</summary>
+                        <div className="mt-3 space-y-3">
+                          <SectionTools chapterId={activeChapter.id} section={sec} refresh={() => refreshChapters(activeChapter.id, selectedSectionIds)} />
+                          {sec.extracted_study_notes && <a className="text-xs text-indigo-200 underline" href={OmniStudyAPI.getExportUrl('chapter', activeChapter.id, 'pdf', true, [sec.id])}>Download previous note PDF</a>}
+                          <div className="study-markdown prose prose-invert max-w-none text-sm leading-relaxed">
+                            <NoteMarkdown text={sec.extracted_study_notes || '_No current note saved for this earlier section._'} />
+                          </div>
+                        </div>
+                      </details>
+                    ))}
+                  </details>
+                )}
                 {visibleStudySections.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-slate-800 bg-slate-900/30 p-12 text-center space-y-3">
                     <Eraser className="mx-auto h-8 w-8 text-slate-500" />
@@ -880,7 +950,7 @@ export function App() {
                               setRegeneratingNotes(true);
                               setRegenModeLabel('selected');
                               try {
-                                await OmniStudyAPI.regenerateChapterNotes(activeChapter.id, [sec.id]);
+                                await generateNotes(activeChapter.id, [sec.id]);
                                 await refreshChapters(activeChapter.id, keep);
                               } finally {
                                 setRegeneratingNotes(false);
@@ -904,12 +974,7 @@ export function App() {
                       </div>
                       <div className="study-markdown prose prose-invert max-w-none text-sm leading-relaxed">
                         {sec.extracted_study_notes ? (
-                          <ReactMarkdown
-                            remarkPlugins={[remarkMath]}
-                            rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }]]}
-                          >
-                            {sec.extracted_study_notes}
-                          </ReactMarkdown>
+                          <NoteMarkdown text={sec.extracted_study_notes} />
                         ) : (
                           <div className="rounded-xl border border-dashed border-slate-800 bg-slate-950/50 p-6 text-center text-xs text-slate-400">
                             Note space cleaned for <strong>{sec.section_code}</strong>. Click{' '}
@@ -1143,12 +1208,19 @@ export function App() {
           >
             <div className="flex items-center justify-between">
               <h2 className="text-base font-bold text-white">
-                What chapter are we studying first?
+                Import a chapter
               </h2>
               {chapters.length > 0 && (
                 <button
                   type="button"
-                  onClick={() => setShowOnboardModal(false)}
+                  disabled={onboarding}
+                  onClick={() => {
+                    setShowOnboardModal(false);
+                    setSlideFile(null);
+                    setTextbookFile(null);
+                    setTestbankFile(null);
+                    setImportError('');
+                  }}
                   className="text-xs text-slate-400 hover:text-white"
                 >
                   Close
@@ -1156,15 +1228,15 @@ export function App() {
               )}
             </div>
             <p className="text-xs text-slate-400">
-              Upload your lecture slides first (PPTX, PDF, or MD). OmniStudy AI locks the study guide and exam scope strictly to the sections covered in your slides.
+              Import PDF, PPTX, Markdown, or plain text. Textbooks can be up to 200 MB; lecture slides and question banks can be up to 50 MB each. Generate notes separately after import.
             </p>
 
             <div className="space-y-3">
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
+                <label htmlFor="import-course" className="block text-xs font-medium text-slate-300 mb-1">
                   Course Name
                 </label>
-                <input
+                <input id="import-course" disabled={onboarding}
                   required
                   value={courseName}
                   onChange={(e) => setCourseName(e.target.value)}
@@ -1174,10 +1246,10 @@ export function App() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Target Chapter to Study First
+                <label htmlFor="import-chapter" className="block text-xs font-medium text-slate-300 mb-1">
+                  Chapter Title
                 </label>
-                <input
+                <input id="import-chapter" disabled={onboarding}
                   required
                   value={chapterTitle}
                   onChange={(e) => setChapterTitle(e.target.value)}
@@ -1187,10 +1259,10 @@ export function App() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-indigo-300 mb-1">
-                  1. Upload Lecture Slides (Priority Scope — .pptx, .pdf, .md) *
+                <label htmlFor="import-slides" className="block text-xs font-medium text-indigo-300 mb-1">
+                  1. Lecture Slides or Notes (Required)
                 </label>
-                <input
+                <input id="import-slides" disabled={onboarding}
                   required
                   type="file"
                   accept=".pptx,.pdf,.md,.txt"
@@ -1200,22 +1272,22 @@ export function App() {
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-slate-400 mb-1">
-                  2. Upload Supplementary Textbook / Article (Optional — .pdf, .md)
+                <label htmlFor="import-textbook" className="block text-xs font-medium text-slate-400 mb-1">
+                  2. Supplementary Textbook or Article (Optional)
                 </label>
-                <input
+                <input id="import-textbook" disabled={onboarding}
                   type="file"
-                  accept=".pdf,.md,.txt"
+                  accept=".pdf,.pptx,.md,.txt"
                   onChange={(e) => setTextbookFile(e.target.files?.[0] || null)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 p-2 text-xs text-slate-300"
                 />
               </div>
 
               <div>
-                <label className="block text-xs font-medium text-purple-300 mb-1">
-                  3. Upload Course Testbank / Past Exam Paper (Optional — .pdf, .pptx, .md, .txt)
+                <label htmlFor="import-testbank" className="block text-xs font-medium text-purple-300 mb-1">
+                  3. Question Bank or Past Exam Paper (Optional)
                 </label>
-                <input
+                <input id="import-testbank" disabled={onboarding}
                   type="file"
                   accept=".pdf,.pptx,.md,.txt"
                   onChange={(e) => setTestbankFile(e.target.files?.[0] || null)}
@@ -1224,6 +1296,7 @@ export function App() {
               </div>
             </div>
 
+            {importError && <p role="alert" className="rounded-lg border border-rose-500/40 bg-rose-950/60 px-3 py-2 text-sm text-rose-100">{importError}</p>}
             <div className="flex justify-end gap-2 pt-2">
               <button
                 type="submit"
@@ -1232,8 +1305,8 @@ export function App() {
               >
                 <FileUp className="h-4 w-4" />
                 {onboarding
-                  ? 'Mapping Slide Sections & Generating Study Notes...'
-                  : 'Parse Slides & Build Study Workspace'}
+                  ? 'Importing files…'
+                  : 'Import Chapter'}
               </button>
             </div>
           </form>
