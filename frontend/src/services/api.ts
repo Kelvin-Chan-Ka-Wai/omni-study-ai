@@ -1,7 +1,8 @@
-import axios from 'axios';
+import axios, { type AxiosError, type InternalAxiosRequestConfig } from 'axios';
 import {
   ActiveExamSession,
   ChapterSummary,
+  SlideOutline,
   WrongQuestionItem,
 } from '../types/assessment';
 
@@ -13,15 +14,58 @@ const api = axios.create({
   withCredentials: true,
 });
 
+type RequestConfig = InternalAxiosRequestConfig & {
+  localSession?: Promise<unknown>;
+  retriedSession?: boolean;
+  inlineError?: boolean;
+};
+
+export function requestError(error: unknown, fallback = 'Request failed. Please retry.'): string {
+  if (axios.isAxiosError(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    if (Array.isArray(detail)) {
+      const messages = detail.map((item) => item?.msg).filter((message): message is string => typeof message === 'string');
+      if (messages.length) return messages.join(' ');
+    }
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') return 'The local app did not respond in time. Check whether your last action was saved before trying again.';
+    if (!error.response) return 'Could not reach the local app. Reopen OmniStudy AI and try again.';
+    return fallback;
+  }
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 let session: Promise<unknown> | null = null;
-api.interceptors.request.use(async (config) => {
-  if (!session) session = axios.get(`${BACKEND_URL}/api/session`, { withCredentials: true }).catch((error) => { session = null; throw error; });
-  await session;
+api.interceptors.request.use(async (config: RequestConfig) => {
+  if (!session) {
+    session = axios.get(`${BACKEND_URL}/api/session`, { withCredentials: true, timeout: 10000 }).catch((error: unknown) => {
+      session = null;
+      throw error;
+    });
+  }
+  config.localSession = session;
+  try {
+    await session;
+  } catch (error) {
+    if (axios.isAxiosError(error)) {
+      // Keep per-request options when several requests share a failed session handshake.
+      throw new axios.AxiosError(error.message, error.code, config, error.request, error.response);
+    }
+    throw error;
+  }
   return config;
 });
-api.interceptors.response.use((response) => response, (error) => {
-  if (error.response?.status === 401) session = null;
-  window.dispatchEvent(new CustomEvent('omnistudy-error', { detail: error.response?.data?.detail || error.message || 'Request failed. Please retry.' }));
+api.interceptors.response.use((response) => response, (error: AxiosError<{ detail?: string }>) => {
+  const config = error.config as RequestConfig | undefined;
+  if (config && error.response?.status === 401 && error.response.data?.detail === 'Open the local app to establish a session.') {
+    // Only this middleware response guarantees that a write has not run yet.
+    if (session === config.localSession) session = null;
+    if (!config.retriedSession) {
+      config.retriedSession = true;
+      return api.request(config);
+    }
+  }
+  if (!config?.inlineError) window.dispatchEvent(new CustomEvent('omnistudy-error', { detail: requestError(error) }));
   return Promise.reject(error);
 });
 
@@ -89,6 +133,13 @@ export const OmniStudyAPI = {
     return data;
   },
 
+  async reviewSlideOutline(chapterId: number, apply = false): Promise<SlideOutline> {
+    const url = `/api/chapters/${chapterId}/slide-outline`;
+    const options = { inlineError: true } as Partial<RequestConfig>;
+    const { data } = apply ? await api.post(url, undefined, options) : await api.get(url, options);
+    return data;
+  },
+
   async deleteChapter(chapterId: number) {
     const { data } = await api.delete(`/api/chapters/${chapterId}`);
     return data;
@@ -107,14 +158,16 @@ export const OmniStudyAPI = {
     form.append('slide_file', slideFile);
     if (textbookFile) form.append('textbook_file', textbookFile);
     if (testbankFile) form.append('testbank_file', testbankFile);
-    const { data } = await api.post('/api/chapters/onboard', form);
+    const { data } = await api.post<{ chapter_id: number; total_slides_parsed: number; warnings: string[] }>(
+      '/api/chapters/onboard', form, { inlineError: true } as Partial<RequestConfig>
+    );
     return data;
   },
 
   async uploadChapterTestbank(chapterId: number, testbankFile: File) {
     const form = new FormData();
     form.append('testbank_file', testbankFile);
-    const { data } = await api.post(`/api/chapters/${chapterId}/upload-testbank`, form);
+    const { data } = await api.post<{ testbank_file_path: string; warnings: string[] }>(`/api/chapters/${chapterId}/upload-testbank`, form);
     return data;
   },
 
