@@ -4,10 +4,17 @@ from fastapi import HTTPException
 from models import ChapterSection
 
 
-def selected_sections(db, chapter_id, ids, all_sections=False):
+def section_order(section):
+    match = re.fullmatch(r"Section (\d+)", section.section_code)
+    return (int(match.group(1)) if match else section.id, section.id)
+
+
+def selected_sections(db, chapter_id, ids, all_sections=False, *, include_archived=False):
     query = db.query(ChapterSection).filter(ChapterSection.chapter_id == chapter_id).order_by(ChapterSection.id)
     if all_sections:
-        return query.all()
+        return sorted(query.filter_by(is_archived=False).all(), key=section_order)
+    if not include_archived:
+        query = query.filter_by(is_archived=False)
     if not ids:
         raise HTTPException(400, "Select at least one section. All sections requires an explicit action.")
     if any(not isinstance(i, int) or i <= 0 for i in ids):
@@ -15,7 +22,7 @@ def selected_sections(db, chapter_id, ids, all_sections=False):
     rows = query.filter(ChapterSection.id.in_(ids)).all()
     if {s.id for s in rows} != set(ids):
         raise HTTPException(400, "Some selected sections do not belong to this chapter.")
-    return rows
+    return sorted(rows, key=section_order)
 
 
 def page_numbers(reference):

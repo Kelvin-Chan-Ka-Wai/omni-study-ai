@@ -273,7 +273,7 @@ class ScoringEngine:
 
         all_sections = (
             db.query(ChapterSection)
-            .filter(ChapterSection.chapter_id == exam.chapter_id)
+            .filter_by(chapter_id=exam.chapter_id, is_archived=False)
             .all()
         )
         chapter = db.query(Chapter).filter(Chapter.id == exam.chapter_id).first()

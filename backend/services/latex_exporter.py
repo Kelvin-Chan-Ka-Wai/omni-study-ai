@@ -1,7 +1,9 @@
 import html
 import json
 import re
+from uuid import uuid4
 from models import Chapter, ChapterSection, ExamSession, QuestionRecord, WrongQuestionBank
+from services.study_math import math_spans, normalize_study_math
 
 
 class AcademicExporter:
@@ -17,30 +19,55 @@ class AcademicExporter:
 
     @staticmethod
     def render_printable_katex_pdf_html(title: str, subtitle: str, markdown_body: str) -> str:
-        """
-        Generates a standalone, publication-quality HTML5 + KaTeX + Marked document
-        that automatically renders all LaTeX formulas and opens macOS Save-as-PDF dialog.
-        """
+        """Render Markdown and identified math separately using local assets."""
         from markdown_it import MarkdownIt
-        # Disable raw HTML and remote images; preserve formulas before Markdown processing.
-        math = []
-        def protect(match):
-            math.append(match.group(0))
-            return f"OMNIMATHPLACEHOLDER{len(math)-1}END"
-        protected = re.sub(r"\$\$[\s\S]*?\$\$|\$[^$\n]+\$", protect, markdown_body)
+        from markdown_it.token import Token
+
+        markdown = normalize_study_math(markdown_body)
+        formulas = list(math_spans(markdown))
+        prefix = f"OMNIMATH{uuid4().hex}X"
+        placeholder = re.compile(rf"{prefix}(\d+)Z")
+        protected = []
+        last = 0
+        for index, formula in enumerate(formulas):
+            protected.extend((markdown[last:formula.start], f"{prefix}{index}Z"))
+            last = formula.end
+        protected.append(markdown[last:])
         parser = MarkdownIt("commonmark", {"html": False})
         parser.disable("image")
-        rendered = parser.render(protected)
-        for index, expression in enumerate(math):
-            rendered = rendered.replace(f"OMNIMATHPLACEHOLDER{index}END", html.escape(expression))
+        tokens = parser.parse("".join(protected))
+        for token in tokens:
+            if not token.children:
+                continue
+            children = []
+            for child in token.children:
+                if child.type != "text" or prefix not in child.content:
+                    children.append(child)
+                    continue
+                cursor = 0
+                for marker in placeholder.finditer(child.content):
+                    if marker.start() > cursor:
+                        children.append(Token("text", "", 0, content=child.content[cursor:marker.start()]))
+                    formula = formulas[int(marker.group(1))]
+                    mode = "block" if formula.display else "inline"
+                    children.append(Token("html_inline", "", 0, content=(
+                        f'<span class="study-formula" data-mode="{mode}">{html.escape(formula.content.strip())}</span>'
+                    )))
+                    cursor = marker.end()
+                if cursor < len(child.content):
+                    children.append(Token("text", "", 0, content=child.content[cursor:]))
+            token.children = children
+        rendered = parser.renderer.render(tokens, parser.options, {})
         title, subtitle = html.escape(title), html.escape(subtitle)
         return f"""<!doctype html><html><head><meta charset="utf-8"><title>{title}</title>
 <link rel="stylesheet" href="https://assets.omnistudy.local/katex.min.css">
 <script src="https://assets.omnistudy.local/katex.min.js"></script>
-<script src="https://assets.omnistudy.local/auto-render.min.js"></script>
 <style>@page{{size:A4;margin:18mm}}body{{font:11pt Georgia,serif;color:#16213a;line-height:1.6}}h1,h2,h3{{font-family:Arial,sans-serif;break-after:avoid}}h1{{color:#3730a3}}h2{{border-left:4px solid #6366f1;padding-left:12px}}pre{{white-space:pre-wrap}}.katex-display{{overflow:visible}}blockquote{{border-left:3px solid #a5b4fc;padding-left:12px}}</style>
 </head><body><h1>{title}</h1><p>{subtitle}</p><main id="content">{rendered}</main>
-<script>renderMathInElement(document.getElementById('content'),{{delimiters:[{{left:'$$',right:'$$',display:true}},{{left:'$',right:'$',display:false}}],throwOnError:false}});window.formulasReady=true;</script></body></html>"""
+<script>for (const formula of document.querySelectorAll('.study-formula')) {{
+  katex.render(formula.textContent, formula, {{displayMode: formula.dataset.mode === 'block', throwOnError: false, trust: false}});
+}}
+window.formulasReady=true;</script></body></html>"""
 
     @classmethod
     def export_chapter_study_guide(
@@ -57,7 +84,7 @@ class AcademicExporter:
         for sec in sections:
             badge = "Mastered" if sec.is_mastered else f"In Progress ({sec.best_accuracy * 100:.0f}%)"
             lines.append(f"## {sec.section_code}: {sec.section_title} ({sec.slide_pages}) — [{badge}]\n")
-            lines.append(sec.extracted_study_notes or "_No notes extracted._")
+            lines.append(normalize_study_math(sec.extracted_study_notes or "") or "_No notes extracted._")
             lines.append("\n\n---\n")
         md_doc = "\n".join(lines)
 
@@ -72,7 +99,7 @@ class AcademicExporter:
 
         body = []
         for sec in sections:
-            notes_tex = cls._md_to_latex_safe(sec.extracted_study_notes or "")
+            notes_tex = cls._md_to_latex_safe(normalize_study_math(sec.extracted_study_notes or ""))
             body.append(
                 f"\\section{{{sec.section_code}: {sec.section_title} ({sec.slide_pages})}}\n"
                 f"\\textit{{Best Quiz Accuracy: {sec.best_accuracy * 100:.0f}\\%}}\\par\\medskip\n"
@@ -111,7 +138,8 @@ class AcademicExporter:
             "---\n",
         ]
         for idx, q in enumerate(questions, start=1):
-            lines.append(f"### Q{idx}. [{q.question_type.upper()} — {q.max_points} pts] ({q.slide_reference or 'Slides'})\n")
+            source = '; '.join(filter(None, (q.slide_reference or 'Slides', q.testbank_reference)))
+            lines.append(f"### Q{idx}. [{q.question_type.upper()} — {q.max_points} pts] ({source})\n")
             lines.append(q.prompt_markdown)
             if q.options_json:
                 try:
@@ -142,7 +170,8 @@ class AcademicExporter:
         q_blocks = []
         for idx, q in enumerate(questions, start=1):
             prompt_tex = cls._md_to_latex_safe(q.prompt_markdown)
-            block = [f"\\subsection*{{Question {idx} ({q.max_points} pts) — [{q.slide_reference or 'Slides'}]}}"]
+            source = '; '.join(filter(None, (q.slide_reference or 'Slides', q.testbank_reference)))
+            block = [f"\\subsection*{{Question {idx} ({q.max_points} pts) — [{source}]}}"]
             block.append(prompt_tex)
             if q.options_json:
                 try:
