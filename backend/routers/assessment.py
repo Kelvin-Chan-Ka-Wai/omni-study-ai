@@ -5,11 +5,12 @@ import base64
 import json
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-from database import STORAGE_DIR, get_db
+from database import STORAGE_DIR, SessionLocal, get_db
 from models import Chapter, ChapterSection, ExamSession, QuestionRecord, SlideTranscription
+from services import choice_review
 from services.documents import resolve_local_upload
 from services.slide_outline import review_slides
 from services.scope import selected_sections
@@ -156,8 +157,42 @@ def writing_open(exam):
     return exam.status == "in_progress" and (exam.is_paused or utc_now() < parse_time(exam.deadline_at))
 
 
-def serialize_session(exam, questions):
-    ensure_deadline(exam)
+LOCKED = {"completed", "submitted_grading", "submitted_retry"}
+
+
+def review_item(q, status, draft):
+    if status not in LOCKED:
+        return {}
+    mcq = q.question_type.startswith("mcq")
+    answer = q.user_answer if status == "completed" else draft.get("user_answer")
+    item = {"user_answer": answer, "correct_answer": q.correct_answer}
+    if mcq:
+        item.update(selected_options=sorted(ScoringEngine.parse_option_set(answer or "")),
+                    correct_options=sorted(ScoringEngine.parse_option_set(q.correct_answer)))
+    if status == "completed":
+        return {**item, "score_awarded": q.score_awarded, "is_flagged_wrong": q.is_flagged_wrong,
+                "ai_feedback_and_solution": q.ai_feedback_and_solution}
+    if mcq:
+        scored = ScoringEngine.grade_mcq_five_option(answer or "", q.correct_answer, q.max_points)
+        return {**item, "score_awarded": scored["score_awarded"], "ai_feedback_and_solution": scored["feedback"]}
+    if answer or draft.get("corrected_transcription") or q.handwritten_image_path:
+        return {**item, "grading_pending": True}
+    return {**item, "score_awarded": 0, "ai_feedback_and_solution": "No answer submitted."}
+
+
+def serialize_session(exam, questions, db=None):
+    if exam.status not in LOCKED:
+        ensure_deadline(exam)
+    draft = json.loads(exam.draft_json or "[]")
+    by_id = {a['question_id']: a for a in draft}
+    reviews = choice_review.cached(db, [q.id for q in questions if q.question_type.startswith("mcq")]) if db is not None and exam.status in LOCKED else {}
+    items = [{"id": q.id, "section_id": q.section_id, "question_type": q.question_type,
+              "core_concept_tag": q.core_concept_tag, "slide_reference": q.slide_reference,
+              "testbank_reference": q.testbank_reference, "prompt_markdown": q.prompt_markdown,
+              "options": json.loads(q.options_json) if q.options_json else None,
+              "max_points": q.max_points, "handwritten_image_path": q.handwritten_image_path,
+              **review_item(q, exam.status, by_id.get(q.id, {})),
+              **({"option_explanations": reviews[q.id]} if q.id in reviews else {})} for q in questions]
     return {
         "session_id": exam.id, "chapter_id": exam.chapter_id, "mode": exam.mode,
         "status": exam.status, "time_limit_minutes": exam.time_limit_minutes,
@@ -165,22 +200,35 @@ def serialize_session(exam, questions):
         "deadline_at": exam.deadline_at, "is_paused": exam.is_paused,
         "paused_remaining": exam.paused_remaining, "grace_started_at": exam.grace_started_at,
         "server_now": utc_now().isoformat(), "time_spent_seconds": exam.time_spent_seconds,
-        "draft_answers": json.loads(exam.draft_json or "[]"),
-        "questions": [{"id": q.id, "section_id": q.section_id, "question_type": q.question_type,
-            "core_concept_tag": q.core_concept_tag, "slide_reference": q.slide_reference,
-            "testbank_reference": q.testbank_reference,
-            "prompt_markdown": q.prompt_markdown, "options": json.loads(q.options_json) if q.options_json else None,
-            "max_points": q.max_points, "handwritten_image_path": q.handwritten_image_path,
-            **({"correct_answer": q.correct_answer, "user_answer": q.user_answer, "score_awarded": q.score_awarded,
-                "ai_feedback_and_solution": q.ai_feedback_and_solution} if exam.status == "completed" else {})} for q in questions],
+        "draft_answers": draft, "questions": items,
+        **({"total_score": exam.total_score if exam.status == 'completed' else round(sum(q.get('score_awarded', 0) for q in items), 2)} if exam.status in LOCKED else {}),
     }
+
+
+class ChoiceReviewRequest(BaseModel):
+    question_ids: list[int] = Field(min_length=1, max_length=3)
+
+
+@router.post("/{session_id}/choice-review")
+async def explain_choices(session_id: int, request: ChoiceReviewRequest, db: Session = Depends(get_db)):
+    exam = db.get(ExamSession, session_id)
+    if not exam: raise HTTPException(404, "Exam not found")
+    if exam.status not in LOCKED: raise HTTPException(409, "Submit your paper before reviewing the options.")
+    ids = set(request.question_ids)
+    questions = [q for q in exam.questions if q.id in ids and q.question_type.startswith("mcq")]
+    if len(questions) != len(ids): raise HTTPException(400, "Choose multiple-choice questions from this paper.")
+    try:
+        return await choice_review.explain(db, questions)
+    except Exception:
+        db.rollback()
+        raise HTTPException(503, "Choice explanations are unavailable. Your result is saved; retry the explanations.") from None
 
 
 @router.get("/active/{chapter_id}")
 def active_assessment(chapter_id: int, db: Session = Depends(get_db)):
-    exam = db.query(ExamSession).filter(ExamSession.chapter_id == chapter_id, ExamSession.status.in_(["in_progress", "grace_upload", "grading"])).order_by(ExamSession.id.desc()).first()
+    exam = db.query(ExamSession).filter(ExamSession.chapter_id == chapter_id, ExamSession.status.in_(["in_progress", "grace_upload", "grading", "submitted_grading", "submitted_retry"])).order_by(ExamSession.id.desc()).first()
     if not exam: return None
-    result = serialize_session(exam, exam.questions)
+    result = serialize_session(exam, exam.questions, db)
     db.commit()
     return result
 
@@ -189,7 +237,7 @@ def active_assessment(chapter_id: int, db: Session = Depends(get_db)):
 def get_assessment(session_id: int, db: Session = Depends(get_db)):
     exam = db.get(ExamSession, session_id)
     if not exam: raise HTTPException(404, "Exam not found")
-    result = serialize_session(exam, exam.questions)
+    result = serialize_session(exam, exam.questions, db)
     db.commit()
     return result
 
@@ -201,8 +249,10 @@ def save_draft(session_id: int, submission: SubmitAssessmentRequest, db: Session
     if not writing_open(exam): raise HTTPException(409, "Writing time has ended; your last saved draft is preserved.")
     allowed = {q.id for q in exam.questions}
     if any(a.question_id not in allowed for a in submission.answers): raise HTTPException(400, "Answer does not belong to this exam")
-    exam.draft_json = json.dumps([a.model_dump() for a in submission.answers])
-    exam.time_spent_seconds = max(0, submission.time_spent_seconds)
+    changed = db.query(ExamSession).filter_by(id=session_id, status='in_progress').update({
+        'draft_json': json.dumps([a.model_dump() for a in submission.answers]),
+        'time_spent_seconds': max(0, submission.time_spent_seconds)}, synchronize_session=False)
+    if not changed: raise HTTPException(409, "This paper is already locked.")
     db.commit()
     return {"saved": True, "saved_at": utc_now().isoformat()}
 
@@ -218,21 +268,20 @@ def update_exam_timer(session_id: int, state: TimerStateUpdate, db: Session = De
         raise HTTPException(409, "This exam is no longer editable.")
     ensure_deadline(exam)
     now = utc_now()
+    changes = {}
     if state.enter_grace_upload:
-        if not exam.grace_started_at: exam.grace_started_at = now.isoformat()
-        exam.status = "grace_upload"
-        exam.is_paused = False
+        changes = {"grace_started_at": exam.grace_started_at or now.isoformat(), "status": "grace_upload", "is_paused": False}
     elif exam.status == "in_progress":
         if state.is_paused and not exam.is_paused:
             remaining = max(0, (parse_time(exam.deadline_at) - now).total_seconds())
             if remaining <= 0: raise HTTPException(409, "Writing time has ended")
-            exam.paused_remaining = remaining
-            exam.is_paused = True
+            changes = {"paused_remaining": remaining, "is_paused": True}
         elif not state.is_paused and exam.is_paused:
-            exam.deadline_at = (now + timedelta(seconds=exam.paused_remaining or 0)).isoformat()
-            exam.is_paused = False
+            changes = {"deadline_at": (now + timedelta(seconds=exam.paused_remaining or 0)).isoformat(), "is_paused": False}
+    if changes and not db.query(ExamSession).filter_by(id=session_id, status=exam.status).update(changes, synchronize_session=False):
+        raise HTTPException(409, "This paper is already locked.")
     db.commit()
-    return serialize_session(exam, exam.questions)
+    return serialize_session(exam, exam.questions, db)
 
 
 @router.post("/{session_id}/questions/{question_id}/paste-image")
@@ -268,8 +317,7 @@ def paste_clipboard_solution_image(
     file_path = SNAP_DIR / file_name
     file_path.write_bytes(img_bytes)
 
-    q_rec.handwritten_image_path = str(file_path)
-    db.commit()
+    link_finished_upload(db, q_rec.id, session_id, file_path)
 
     return {
         "question_id": q_rec.id,
@@ -303,14 +351,23 @@ def upload_solution_image_file(
         validate_image(img_bytes)
         f.write(img_bytes)
 
-    q_rec.handwritten_image_path = str(file_path)
-    db.commit()
+    link_finished_upload(db, q_rec.id, session_id, file_path)
 
     return {
         "question_id": q_rec.id,
         "handwritten_image_path": str(file_path),
         "preview_url": f"/storage/handwritten_snaps/{file_name}",
     }
+
+
+def link_finished_upload(db, question_id, session_id, file_path):
+    changed = db.query(QuestionRecord).filter(QuestionRecord.id == question_id,
+        QuestionRecord.session.has(ExamSession.status.in_(["in_progress", "grace_upload"]))).update(
+            {"handwritten_image_path": str(file_path)}, synchronize_session=False)
+    if not changed:
+        db.rollback(); file_path.unlink(missing_ok=True)
+        raise HTTPException(409, "This upload finished after submission and was not included.")
+    db.commit()
 
 
 def validate_image(data):
@@ -343,18 +400,56 @@ async def submit_and_grade_assessment(session_id: int, submission: SubmitAssessm
     if not exam: raise HTTPException(404, "Exam not found")
     if exam.status == "completed" and exam.result_json:
         return json.loads(exam.result_json)
+    previous_status = exam.status
+    claim_submission(db, exam, submission, "grading")
+    return await grade_claimed(session_id, db, "grading", previous_status)
+
+
+def claim_submission(db, exam, submission, target):
+    if exam.status not in ("in_progress", "grace_upload"):
+        raise HTTPException(409, "This paper has already been submitted.")
     allowed = {q.id for q in exam.questions}
     if len({a.question_id for a in submission.answers}) != len(submission.answers) or any(a.question_id not in allowed for a in submission.answers):
         raise HTTPException(400, "Invalid or duplicate question IDs")
-    editable = writing_open(exam)
-    previous_status = exam.status
-    answers = submission.answers if editable else [QuestionSubmissionItem(**a) for a in json.loads(exam.draft_json or "[]")]
-    # Compare-and-set is atomic across concurrent requests, including multiple browser tabs.
-    claimed = db.query(ExamSession).filter(ExamSession.id == session_id, ExamSession.status.in_(["in_progress", "grace_upload"])).update({"status": "grading"}, synchronize_session=False)
-    if not claimed: raise HTTPException(409, "Grading is already in progress; your saved answers are safe")
-    exam.draft_json = json.dumps([a.model_dump() for a in answers])
+    answers = [a.model_dump() for a in submission.answers] if writing_open(exam) else json.loads(exam.draft_json or "[]")
+    changed = db.query(ExamSession).filter(ExamSession.id == exam.id, ExamSession.status == exam.status).update({
+        "status": target, "draft_json": json.dumps(answers), "time_spent_seconds": max(exam.time_spent_seconds or 0, min(max(0, submission.time_spent_seconds), exam.time_limit_minutes * 60))}, synchronize_session=False)
+    if not changed: raise HTTPException(409, "Submission is already in progress; your answers are saved.")
     db.commit()
     db.refresh(exam)
+
+
+async def grade_in_background(session_id):
+    with SessionLocal() as db:
+        try:
+            await grade_claimed(session_id, db, "submitted_grading", "submitted_retry")
+        except HTTPException:
+            pass  # The locked paper remains available for a retry.
+
+
+@router.post("/{session_id}/finish")
+async def finish_now(session_id: int, submission: SubmitAssessmentRequest, tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    exam = db.get(ExamSession, session_id)
+    if not exam: raise HTTPException(404, "Exam not found")
+    if exam.status in ('completed', 'submitted_grading'):
+        return serialize_session(exam, exam.questions, db)
+    if exam.status == 'submitted_retry':
+        changed = db.query(ExamSession).filter_by(id=session_id, status='submitted_retry').update({'status': 'submitted_grading'}, synchronize_session=False)
+        db.commit(); db.refresh(exam)
+        if not changed: return serialize_session(exam, exam.questions, db)
+    else:
+        claim_submission(db, exam, submission, 'submitted_grading')
+    preview = serialize_session(exam, exam.questions, db)
+    if any(q.get('grading_pending') for q in preview['questions']):
+        tasks.add_task(grade_in_background, session_id)
+        return preview
+    await grade_claimed(session_id, db, 'submitted_grading', 'submitted_retry')
+    return serialize_session(exam, exam.questions, db)
+
+
+async def grade_claimed(session_id, db, claimed_status, failure_status):
+    exam = db.get(ExamSession, session_id)
+    answers = [QuestionSubmissionItem(**a) for a in json.loads(exam.draft_json or "[]")]
     try:
         questions = db.query(QuestionRecord).filter_by(session_id=session_id).all()
         answer_map = {a.question_id: a for a in answers}
@@ -364,7 +459,9 @@ async def submit_and_grade_assessment(session_id: int, submission: SubmitAssessm
             raw = item.user_answer if item else ""
             if q.question_type.startswith("mcq"):
                 result = ScoringEngine.grade_mcq_five_option(raw or "", q.correct_answer, q.max_points)
-                return q, str(raw or ""), result["score_awarded"], result["feedback"]
+                explanation = q.ai_feedback_and_solution or ""
+                feedback = "\n\n".join(filter(None, [result["feedback"], explanation]))
+                return q, str(raw or ""), result["score_awarded"], feedback
             corrected = item.corrected_transcription if item else None
             # Do not accept arbitrary client-supplied filesystem paths.
             path = q.handwritten_image_path
@@ -393,7 +490,7 @@ async def submit_and_grade_assessment(session_id: int, submission: SubmitAssessm
         return result
     except BaseException as exc:
         db.rollback()
-        db.query(ExamSession).filter_by(id=session_id, status="grading").update({"status": previous_status}, synchronize_session=False)
+        db.query(ExamSession).filter_by(id=session_id, status=claimed_status).update({"status": failure_status}, synchronize_session=False)
         db.commit()
         if isinstance(exc, (asyncio.CancelledError, HTTPException)): raise
         raise HTTPException(503, "Grading unavailable. Your saved answers are preserved; retry submission.") from None
