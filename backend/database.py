@@ -55,6 +55,7 @@ def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
         connection.exec_driver_sql("UPDATE exam_sessions SET status = 'in_progress' WHERE status = 'grading'")
+        connection.exec_driver_sql("UPDATE exam_sessions SET status = 'submitted_retry' WHERE status = 'submitted_grading'")
         connection.exec_driver_sql("UPDATE generation_jobs SET status = 'failed', message = 'App restarted; previously saved work is preserved. Retry generation.' WHERE status IN ('queued', 'running')")
 
 def get_db():

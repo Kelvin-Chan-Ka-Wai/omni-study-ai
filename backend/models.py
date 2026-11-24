@@ -98,6 +98,12 @@ class QuestionRecord(Base):
     session = relationship("ExamSession", back_populates="questions")
     section = relationship("ChapterSection", back_populates="question_records")
 
+class ChoiceExplanation(Base):
+    __tablename__ = "choice_explanations"
+    question_id = Column(Integer, ForeignKey("question_records.id", ondelete="CASCADE"), primary_key=True)
+    explanations_json = Column(Text, nullable=False)
+
+
 class WrongQuestionBank(Base):
     __tablename__ = "wrong_question_bank"
 
