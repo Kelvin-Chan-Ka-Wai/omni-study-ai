@@ -27,6 +27,7 @@ import {
 import { BACKEND_URL, OmniStudyAPI, requestError } from './services/api';
 import { SectionTools, WorkspaceTools } from './components/layout/StudyTools';
 import { ExamHeaderTimer } from './components/exam/ExamHeaderTimer';
+import { useChoiceReviews } from './components/exam/ChoiceReviews';
 import { McqFiveOptionCard } from './components/exam/McqFiveOptionCard';
 import { PasteSolutionBox } from './components/exam/PasteSolutionBox';
 import { WrongQuestionCard } from './components/wrong-bank/WrongQuestionCard';
@@ -78,6 +79,30 @@ export function App() {
   const [isExamSubmitted, setIsExamSubmitted] = useState(false);
   const [submittingExam, setSubmittingExam] = useState(false);
   const submittingRef = useRef(false);
+
+  const lockedPaper = (status?: string) => ['completed','submitted_grading','submitted_retry'].includes(status || '');
+  const choiceReviews = useChoiceReviews(activeExam, activeTab === 'exam' && isExamSubmitted);
+  const [pollFailed, setPollFailed] = useState(false);
+  useEffect(() => {
+    if (activeExam?.status !== 'submitted_grading') return;
+    let canceled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        const result = await OmniStudyAPI.getAssessment(activeExam.session_id);
+        if (canceled) return;
+        setPollFailed(false);
+        if (result.status !== 'submitted_grading') {
+          setActiveExam(result);
+          if (result.status === 'completed') void refreshChapters(result.chapter_id, selectedSectionIds).catch(() => {});
+          return;
+        }
+      } catch { if (!canceled) setPollFailed(true); }
+      if (!canceled) timer = setTimeout(poll, 2500);
+    };
+    timer = setTimeout(poll, 1000);
+    return () => { canceled = true; clearTimeout(timer); };
+  }, [activeExam?.session_id, activeExam?.status]);
 
   const [wrongError, setWrongError] = useState('');
   const [dueOnly, setDueOnly] = useState(false);
@@ -163,7 +188,7 @@ export function App() {
     let canceled = false;
     OmniStudyAPI.getActiveAssessment(id).then(exam => {
       if (canceled) return;
-      setActiveExam(exam); setIsExamSubmitted(false);
+      setActiveExam(exam); setIsExamSubmitted(lockedPaper(exam?.status));
       const selections: Record<number,string[]> = {}, written: Record<number,string> = {};
       exam?.draft_answers?.forEach(a => { if (Array.isArray(a.user_answer)) selections[a.question_id]=a.user_answer; else written[a.question_id]=a.user_answer || ''; });
       if (exam) {
@@ -322,7 +347,7 @@ export function App() {
   };
 
   const handleSubmitExam = async () => {
-    if (!activeExam || isExamSubmitted || submittingRef.current) return;
+    if (!activeExam || (isExamSubmitted && activeExam.status !== 'submitted_retry') || submittingRef.current) return;
     submittingRef.current = true;
     setSubmittingExam(true);
     try {
@@ -335,25 +360,11 @@ export function App() {
         handwritten_image_path: imagePaths[q.id],
       }));
 
-      const graded = await OmniStudyAPI.submitAssessment(
-        activeExam.session_id,
-        timeSpentSeconds,
-        answersPayload
-      );
-
-      const gradedMap = new Map<number, any>(
-        graded.questions.map((item: any) => [item.question_id, item])
-      );
-
-      setActiveExam({
-        ...activeExam,
-        questions: activeExam.questions.map((q) => {
-          const g = gradedMap.get(q.id);
-          return g ? { ...q, ...g } : q;
-        }),
-      });
+      const result = await OmniStudyAPI.finishAssessment(activeExam.session_id, timeSpentSeconds, answersPayload);
+      setActiveExam(result);
       setIsExamSubmitted(true);
-      setDraftState('Assessment submitted and graded.');
+      setPollFailed(false);
+      setDraftState('');
       localStorage.removeItem(`omnistudy-draft-${activeExam.session_id}`);
       await refreshChapters(activeChapter?.id, selectedSectionIds);
     } finally {
@@ -999,8 +1010,20 @@ export function App() {
                   </div>
                 ) : (
                   <>
-                    <ExamHeaderTimer session={activeExam} isSubmitted={isExamSubmitted} onSessionChange={setActiveExam} onTimeUpdate={setTimeSpentSeconds} onAutoSubmit={handleSubmitExam} />
-                    <p role="status" className="text-xs text-slate-400">{draftState}</p>
+                    {isExamSubmitted ? <section aria-label="Scoreboard" className="rounded-xl border border-indigo-500/50 bg-slate-900 p-5 space-y-2">
+                      <h2 className="text-lg font-bold">Scoreboard</h2>
+                      <div className="text-2xl font-bold text-emerald-300">{activeExam.total_score} / {activeExam.max_score} pts</div>
+                      <p role="status" className="text-sm text-slate-300">{activeExam.status === 'completed' ? 'Final score' : activeExam.status === 'submitted_retry' ? 'Points earned so far. Written grading was interrupted; your submission is saved.' : 'Points earned so far. Submitted written work is being graded.'}</p>
+                      {activeExam.status === 'submitted_grading' && pollFailed && <p>Reconnecting to your saved result…</p>}
+                      {activeExam.status === 'submitted_retry' && <button disabled={submittingExam} onClick={handleSubmitExam} className="underline text-indigo-300">Retry written grading</button>}
+                      {choiceReviews.failed ? <p className="text-sm">Some choice explanations are unavailable. <button className="underline" onClick={choiceReviews.retry}>Retry explanations</button></p> : activeExam.questions.some(q => q.question_type.startsWith('mcq') && !q.option_explanations && !choiceReviews.items[q.id]) && <p className="text-sm text-slate-400">Preparing explanations for each choice…</p>}
+                    </section> : <>
+                    <ExamHeaderTimer onBeforeGrace={() => OmniStudyAPI.saveDraft(activeExam.session_id, payloadRef.current, timeSpentSeconds)} session={activeExam} isSubmitted={isExamSubmitted} onSessionChange={next => setActiveExam(prev => prev?.session_id === next.session_id && !lockedPaper(prev.status) ? next : prev)} onTimeUpdate={setTimeSpentSeconds} onAutoSubmit={handleSubmitExam} />
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-indigo-500/50 bg-slate-900 p-4">
+                      <p className="text-sm text-slate-300">Ready to finish? Photos are optional. Only uploads already attached will be graded.</p>
+                      <button disabled={submittingExam} onClick={handleSubmitExam} className="rounded-lg bg-indigo-600 px-5 py-2 font-semibold text-white">{submittingExam ? 'Submitting…' : 'Submit now'}</button>
+                    </div>
+                    <p role="status" className="text-xs text-slate-400">{draftState}</p></>}
 
                     <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-800 bg-slate-900/60 px-4 py-2.5 text-xs">
                       <span className="text-slate-300 font-medium">
@@ -1043,7 +1066,8 @@ export function App() {
                             key={q.id}
                             index={idx + 1}
                             question={q}
-                            selectedOptions={mcqSelections[q.id] || []}
+                            reasons={q.option_explanations || choiceReviews.items[q.id]}
+                            selectedOptions={(isExamSubmitted ? q.selected_options : mcqSelections[q.id]) || []}
                             onToggleOption={(letter) =>
                               handleToggleMcqOption(q.id, q.question_type, letter)
                             }
@@ -1055,7 +1079,7 @@ export function App() {
                             index={idx + 1}
                             sessionId={activeExam.session_id}
                             question={q}
-                            typedAnswer={writtenAnswers[q.id] || ''}
+                            typedAnswer={(isExamSubmitted ? q.user_answer : writtenAnswers[q.id]) || ''}
                             onChangeTyped={(val) =>
                               setWrittenAnswers((prev) => ({ ...prev, [q.id]: val }))
                             }
@@ -1150,18 +1174,18 @@ export function App() {
                       </span>
                       <div className="text-slate-400">
                         <button className="underline text-indigo-300 mr-3" onClick={async () => {
-                          const exam = await OmniStudyAPI.getAssessment(h.session_id);setActiveExam(exam);setIsExamSubmitted(exam.status === 'completed');
+                          const exam = await OmniStudyAPI.getAssessment(h.session_id);setActiveExam(exam);setIsExamSubmitted(lockedPaper(exam.status));setDraftState('');
                           const selections: Record<number,string[]> = {}, written: Record<number,string> = {};
                           exam.draft_answers?.forEach(a=>{if(Array.isArray(a.user_answer))selections[a.question_id]=a.user_answer;else written[a.question_id]=a.user_answer || '';});
                           setMcqSelections(selections);setWrittenAnswers(written);setImagePaths({});setActiveTab('exam');
-                        }}>Open / resume</button>
+                        }}>{lockedPaper(h.status) ? 'Review results' : 'Open / resume'}</button>
                         Started: {new Date(h.started_at).toLocaleString()}
                       </div>
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="text-right">
                         <div className="text-sm font-bold text-emerald-400">
-                          {h.total_score} / {h.max_score} pts ({h.accuracy_percent}%)
+                          {h.status.startsWith('submitted_') ? 'Written grading pending' : `${h.total_score} / ${h.max_score} pts (${h.accuracy_percent}%)`}
                         </div>
                         <div className="text-slate-400">
                           Time Spent: {Math.round(h.time_spent_seconds / 60)} mins
