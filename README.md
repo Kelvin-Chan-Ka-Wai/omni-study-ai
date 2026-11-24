@@ -94,9 +94,10 @@ Configure only routes you use. The existing router supports campus GenAI, direct
 3. Use **View supporting slides & note history** to verify sources or restore earlier notes.
 4. For image-only material, add a verified page transcription in the study tools. Automatic diagram understanding is not guaranteed.
 5. Open or resume an assessment. Answers autosave; the backend controls time. Practice pause is explicit.
-6. Paste/upload handwriting. Use **Read handwriting into editable answer**, correct the text, then submit.
-7. Review errors, generate twin questions, and use **Due for review only** for scheduled practice.
-8. Download selected notes as PDF/Markdown/LaTeX, or create a private study backup.
+6. Choose **Submit now** whenever you are ready. Photos are optional; only attachments that have finished uploading are included. To add a photo first, use the separate upload window.
+7. The scoreboard shows earned / possible points immediately. Submitted written or calculation work receives its usual personalized analysis in the background; the score is marked final when grading finishes. Open **Study History → Review results** to revisit your work, including why each multiple-choice option is right or wrong. Choice explanations are saved for offline review once prepared.
+8. Review errors, generate twin questions, and use **Due for review only** for scheduled practice.
+9. Download selected notes as PDF/Markdown/LaTeX, or create a private study backup.
 
 ## Verification
 
