@@ -57,6 +57,10 @@ export interface AssessmentQuestion {
   // Populated after grading
   user_answer?: string;
   correct_answer?: string;
+  correct_options?: string[];
+  selected_options?: string[];
+  option_explanations?: Record<string, string>;
+  grading_pending?: boolean;
   score_awarded?: number;
   is_flagged_wrong?: boolean;
   ai_feedback_and_solution?: string;
@@ -71,6 +75,7 @@ export interface ActiveExamSession {
   time_limit_minutes: number;
   grace_period_minutes: number;
   max_score: number;
+  total_score?: number;
   provider_used?: string;
   model_used?: string;
   status?: string;
