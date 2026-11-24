@@ -2,7 +2,6 @@ import React from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
-import { CheckCircle2, AlertTriangle } from 'lucide-react';
 import { AssessmentQuestion } from '../../types/assessment';
 
 interface Props {
@@ -11,6 +10,7 @@ interface Props {
   selectedOptions: string[];
   onToggleOption: (letter: 'A' | 'B' | 'C' | 'D' | 'E') => void;
   isSubmitted: boolean;
+  reasons?: Record<string, string>;
 }
 
 const OPTION_KEYS: Array<'A' | 'B' | 'C' | 'D' | 'E'> = ['A', 'B', 'C', 'D', 'E'];
@@ -20,7 +20,7 @@ export const McqFiveOptionCard: React.FC<Props> = ({
   question,
   selectedOptions,
   onToggleOption,
-  isSubmitted,
+  isSubmitted, reasons,
 }) => {
   const isMulti = question.question_type === 'mcq_multi';
 
@@ -44,6 +44,7 @@ export const McqFiveOptionCard: React.FC<Props> = ({
           </span>
           <span className="text-xs text-slate-400">
             [{question.slide_reference} • {question.core_concept_tag}]
+            {question.testbank_reference && <span className="ml-2 text-teal-300">{question.testbank_reference}</span>}
           </span>
         </div>
 
@@ -74,7 +75,7 @@ export const McqFiveOptionCard: React.FC<Props> = ({
           const isPicked = selectedOptions.includes(letter);
           const isCorrectChoice =
             isSubmitted &&
-            question.correct_answer?.toUpperCase().includes(letter);
+            question.correct_options?.includes(letter);
 
           let borderStyle = 'border-slate-800 bg-slate-950/60 hover:border-slate-700';
           if (isPicked && !isSubmitted) {
@@ -90,12 +91,12 @@ export const McqFiveOptionCard: React.FC<Props> = ({
           }
 
           return (
+            <div key={letter}>
             <button
-              key={letter}
               type="button"
               disabled={isSubmitted}
               onClick={() => onToggleOption(letter)}
-              className={`flex items-start gap-3 rounded-lg border p-3 text-left text-sm transition ${borderStyle}`}
+              className={`w-full flex items-start gap-3 rounded-lg border p-3 text-left text-sm transition ${borderStyle}`}
             >
               <span
                 className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-xs font-bold ${
@@ -112,6 +113,11 @@ export const McqFiveOptionCard: React.FC<Props> = ({
                 </ReactMarkdown>
               </div>
             </button>
+            {isSubmitted && <div className="ml-3 border-l border-slate-700 px-3 py-1.5 text-sm text-slate-300">
+              <strong className={isCorrectChoice ? 'text-emerald-300' : 'text-slate-400'}>{isCorrectChoice ? 'Correct choice' : 'Incorrect choice'}{isPicked ? ' · You selected this' : ''}</strong>
+              {reasons?.[letter] && <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{reasons[letter]}</ReactMarkdown>}
+            </div>}
+            </div>
           );
         })}
       </div>
@@ -119,17 +125,7 @@ export const McqFiveOptionCard: React.FC<Props> = ({
       {isSubmitted && question.ai_feedback_and_solution && (
         <div className="mt-4 rounded-lg border border-slate-700/80 bg-slate-950/90 p-4 text-xs space-y-2">
           <div className="flex items-center gap-2 font-semibold text-indigo-300">
-            {question.is_flagged_wrong ? (
-              <>
-                <AlertTriangle className="h-4 w-4 text-amber-400" />
-                <span>Added to Wrong Question Collection (0/3 Streak) • AI Solution:</span>
-              </>
-            ) : (
-              <>
-                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                <span>Full Credit • Official Explanation:</span>
-              </>
-            )}
+            Scoring feedback
           </div>
           <div className="prose prose-invert max-w-none text-xs text-slate-300">
             <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
