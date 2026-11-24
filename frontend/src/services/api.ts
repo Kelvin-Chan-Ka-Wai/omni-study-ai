@@ -96,6 +96,12 @@ export const OmniStudyAPI = {
   async cancelGeneration() { if (currentJob) await api.delete(`/api/jobs/${currentJob}`); },
   async getActiveAssessment(id: number): Promise<ActiveExamSession | null> { return (await api.get(`/api/assessments/active/${id}`)).data; },
   async getAssessment(id: number): Promise<ActiveExamSession> { return (await api.get(`/api/assessments/${id}`)).data; },
+  async finishAssessment(id: number, time: number, answers: object[]): Promise<ActiveExamSession> {
+    return (await api.post(`/api/assessments/${id}/finish`, {time_spent_seconds: time, answers})).data;
+  },
+  async choiceReviews(id: number, questionIds: number[]): Promise<Record<number, Record<string,string>>> {
+    return (await api.post(`/api/assessments/${id}/choice-review`, {question_ids: questionIds}, {inlineError:true} as Partial<RequestConfig>)).data;
+  },
   async saveDraft(id: number, answers: object[], time: number) { return (await api.put(`/api/assessments/${id}/draft`, { answers, time_spent_seconds: time })).data; },
   async controlTimer(id: number, isPaused: boolean, grace = false): Promise<ActiveExamSession> { return (await api.patch(`/api/assessments/${id}/timer`, { is_paused: isPaused, time_spent_seconds: 0, enter_grace_upload: grace })).data; },
   async noteVersions(chapter: number, section: number): Promise<{ id: number; reason: string; created_at: string }[]> { return (await api.get(`/api/chapters/${chapter}/sections/${section}/versions`)).data; },
