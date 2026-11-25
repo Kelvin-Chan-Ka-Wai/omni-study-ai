@@ -7,10 +7,12 @@ import uuid
 from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 from database import STORAGE_DIR, SessionLocal, get_db
-from models import Chapter, ChapterSection, ExamSession, QuestionRecord, SlideTranscription
+from models import Chapter, ChapterSection, ExamSession, QuestionRecord, QuestionSource, PaperSectionSnapshot, SlideTranscription
 from services import choice_review
+from services.question_history import QuestionHistory, RepeatedQuestion
 from services.documents import resolve_local_upload
 from services.slide_outline import review_slides
 from services.scope import selected_sections
@@ -81,19 +83,29 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
 
     tb_path = resolve_local_upload(STORAGE_DIR, chapter.testbank_file_path)
 
-    generated = await SlideScopeRAG.generate_scoped_assessment(
-        course_name=chapter.course_name,
-        chapter_title=chapter.chapter_title,
-        scoped_sections=scoped_dicts,
-        mode=req.mode,
-        testbank_file_path=tb_path,
-    )
+    snapshot = [{k: getattr(section, k) for k in ("id", "section_code", "section_title", "slide_pages")} for section in sections]
+    course = chapter.course_name
+    try:
+        generated = await SlideScopeRAG.generate_scoped_assessment(
+            course_name=course, chapter_title=chapter.chapter_title, scoped_sections=scoped_dicts,
+            mode=req.mode, testbank_file_path=tb_path, history=QuestionHistory.load(db, course, chapter.testbank_file_path),
+        )
+    except RepeatedQuestion as error:
+        raise HTTPException(422, str(error)) from error
 
+    # Refresh after slow model calls. Serialize only the final check and insert, even across workers.
+    db.rollback()
+    db.execute(text('BEGIN IMMEDIATE'))
+    try:
+        QuestionHistory.load(db, course).accept(generated['questions'])
+    except RepeatedQuestion:
+        db.rollback()
+        raise HTTPException(409, 'A question was already used. No paper was saved. Generate another paper or broaden the selected sections.') from None
     blueprint = generated["blueprint"]
     exam = ExamSession(
         chapter_id=chapter.id,
         mode=req.mode,
-        selected_section_ids_json=json.dumps([s.id for s in sections]),
+        selected_section_ids_json=json.dumps([s["id"] for s in snapshot]),
         time_limit_minutes=blueprint["time_limit_minutes"],
         grace_period_minutes=blueprint["grace_period_minutes"],
         max_score=blueprint["total_points"],
@@ -104,7 +116,8 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
     db.flush()
 
     # Map section_code -> section.id so mastery updates link back to exact slide sections
-    code_to_sec_id = {s.section_code.lower(): s.id for s in sections}
+    db.add(PaperSectionSnapshot(session_id=exam.id, sections_json=json.dumps(snapshot, ensure_ascii=False)))
+    code_to_sec_id = {s["section_code"].lower(): s["id"] for s in snapshot}
 
     saved_questions = []
     for q in generated["questions"]:
@@ -132,6 +145,9 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
         saved_questions.append(q_rec)
 
     db.flush()
+    for row, q in zip(saved_questions, generated['questions']):
+        if q.get('_source'):
+            db.add(QuestionSource(question_id=row.id, source_json=json.dumps(q['_source'], ensure_ascii=False)))
     result = serialize_session(exam, saved_questions)
     db.commit()
     result.update(provider_used=generated["provider_used"], model_used=generated["model_used"])

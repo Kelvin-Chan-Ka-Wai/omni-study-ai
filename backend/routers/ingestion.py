@@ -1,4 +1,6 @@
 import asyncio
+import json
+from collections import defaultdict
 from contextlib import ExitStack
 from datetime import timezone
 from pathlib import Path
@@ -6,7 +8,7 @@ from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, UploadF
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from database import STORAGE_DIR, get_db
-from models import Chapter, ChapterSection, ExamSession, WrongQuestionBank, NoteVersion, SlideTranscription, GenerationJob
+from models import Chapter, ChapterSection, ExamSession, QuestionRecord, PaperSectionSnapshot, WrongQuestionBank, NoteVersion, SlideTranscription, GenerationJob
 from services.documents import DOCUMENT_SUFFIXES, VISUAL_ONLY, DocumentReadError, read_pages, resolve_local_upload
 from services.scope import selected_sections, page_numbers, section_order
 from services.slide_outline import build_outline, format_slide_pages, review_slides
@@ -311,6 +313,43 @@ def clear_study_notes(
     return {"status": "cleared", "chapter_id": chapter_id, "cleared_section_ids": cleared_ids}
 
 
+def _history_sections(db, chapter, history):
+    """Reconstruct older papers without rewriting them; newer papers keep their original labels."""
+    current = {s.id: {k: getattr(s, k) for k in ("id", "section_code", "section_title", "slide_pages")}
+               for s in sorted(chapter.sections, key=section_order)}
+    snapshots = dict(db.query(PaperSectionSnapshot.session_id, PaperSectionSnapshot.sections_json)
+                     .join(ExamSession, ExamSession.id == PaperSectionSnapshot.session_id)
+                     .filter(ExamSession.chapter_id == chapter.id).all())
+    def has_answer(value):
+        if isinstance(value, list):
+            return any(has_answer(v) for v in value)
+        return isinstance(value, str) and value.strip().casefold() not in ('', '[]', '(no answer submitted)')
+
+    drafts = {h.id: {a['question_id'] for a in json.loads(h.draft_json or '[]')
+                     if has_answer(a.get('user_answer')) or has_answer(a.get('corrected_transcription'))} for h in history}
+    counts = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    rows = (db.query(QuestionRecord.session_id, QuestionRecord.section_id, QuestionRecord.id,
+                     QuestionRecord.user_answer, QuestionRecord.handwritten_image_path.is_not(None))
+            .join(ExamSession).filter(ExamSession.chapter_id == chapter.id))
+    for session, sid, qid, answer, uploaded in rows:
+        pair = counts[session][sid]
+        pair[0] += 1
+        pair[1] += int(uploaded or qid in drafts[session] or has_answer(answer))
+    result = {}
+    for h in history:
+        meta = current.copy()
+        meta.update({s['id']: s for s in json.loads(snapshots.get(h.id, '[]'))})
+        selected = json.loads(h.selected_section_ids_json or '[]')
+        linked = counts[h.id]
+        ordered = dict.fromkeys([*selected, *(sid for sid in meta if sid in linked), *linked])
+        result[h.id] = []
+        for sid in ordered:
+            count, answered = counts[h.id].get(sid, (0, 0))
+            section = meta.get(sid, {'id': sid, 'section_code': None, 'section_title': None, 'slide_pages': None})
+            result[h.id].append({**section, 'question_count': count, 'answered_count': answered})
+    return result
+
+
 @router.get("/{chapter_id}")
 def get_chapter_detail(chapter_id: int, db: Session = Depends(get_db)):
     chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
@@ -324,6 +363,7 @@ def get_chapter_detail(chapter_id: int, db: Session = Depends(get_db)):
         .all()
     )
 
+    history_sections = _history_sections(db, chapter, history) if history else {}
     archived_ids = [s.id for s in chapter.sections if s.is_archived]
     archived_with_history = {row[0] for row in db.query(NoteVersion.section_id).filter(
         NoteVersion.section_id.in_(archived_ids)).distinct()} if archived_ids else set()
@@ -355,6 +395,7 @@ def get_chapter_detail(chapter_id: int, db: Session = Depends(get_db)):
         "study_history": [
             {
                 "session_id": h.id,
+                "sections": history_sections[h.id],
                 "mode": h.mode,
                 "status": h.status,
                 "total_score": h.total_score,
