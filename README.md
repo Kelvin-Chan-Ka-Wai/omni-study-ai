@@ -96,6 +96,9 @@ Configure only routes you use. The existing router supports campus GenAI, direct
 5. Open or resume an assessment. Answers autosave; the backend controls time. Practice pause is explicit.
 6. Choose **Submit now** whenever you are ready. Photos are optional; only attachments that have finished uploading are included. To add a photo first, use the separate upload window.
 7. The scoreboard shows earned / possible points immediately. Submitted written or calculation work receives its usual personalized analysis in the background; the score is marked final when grading finishes. Open **Study History → Review results** to revisit your work, including why each multiple-choice option is right or wrong. Choice explanations are saved for offline review once prepared.
+8. **Study History** lists the sections for each attempt: section number, title, slide range, and how many questions you answered. A section selected but never tested is labeled separately. New attempts keep their section labels even if the outline changes later.
+
+Quizzes, mock tests, midterms and finals check earlier papers in the same course, including unfinished papers. Unused, relevant testbank questions take priority; changing a bank question’s format does not make it new. When more questions are needed, the app asks for original problems and checks the returned wording for duplicates. If it cannot fill the paper with distinct questions, it leaves your history untouched. Deliberate retries in the Wrong Question Bank are still available.
 8. Review errors, generate twin questions, and use **Due for review only** for scheduled practice.
 9. Download selected notes as PDF/Markdown/LaTeX, or create a private study backup.
 
