@@ -5,6 +5,7 @@ from pathlib import Path
 from services.documents import VISUAL_ONLY, DocumentReadError, read_pages
 from services.llm_harness import HybridLLMHarness
 from services.scoring_engine import ScoringEngine
+from services.question_history import QuestionHistory, RepeatedQuestion, identity
 from services.scope import page_numbers
 from services.slide_outline import build_outline, format_slide_pages, review_slides
 from services.study_math import normalize_study_math
@@ -214,6 +215,7 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
         scoped_sections: list[dict],
         mode: str = "section_quiz",
         testbank_file_path: str | Path | None = None,
+        history: QuestionHistory | None = None,
     ) -> dict:
         """Reserve assessment slots for distinct, in-scope bank items before filling gaps."""
         blueprint = ScoringEngine.EXAM_BLUEPRINTS.get(
@@ -226,14 +228,29 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
         if any(len(s['source_text']) > 24000 for s in scoped_sections):
             raise ValueError('A selected section is too large; split its slide range before generating.')
         items = bank_items(testbank_file_path) if testbank_file_path else []
-        plan = bank_plan(items, scoped_sections, dist)
+        history = history if history is not None else QuestionHistory()
+        # Filter history before ranking, so unused bank problems keep first priority.
+        unique_bank = QuestionHistory()
+        available = []
+        skip_pages = history.untraceable_pages(items)
+        for item in items:
+            if item.page in skip_pages:
+                continue
+            key = identity(item.stem, item.options)
+            if not history.contains(key) and not unique_bank.contains(key):
+                available.append(item)
+                unique_bank.add(key)
+        plan = bank_plan(available, scoped_sections, dist)
+        reserved = QuestionHistory()
+        for entries in plan.values():
+            for _, item in entries: reserved.add(identity(item.stem, item.options))
         by_code = {s['section_code']: s for s in scoped_sections}
         fixed, batches = [], []
         for kind, spec in dist.items():
             pending = []
             for code, item in plan[kind]:
                 keys = re.fullmatch(r'[A-E](?:\s*[,;]\s*[A-E])*', item.answer.upper())
-                source = {'section_code':code, 'slide_reference':by_code[code]['slide_pages'],
+                source = {'_source': (item.stem, item.options), 'section_code':code, 'slide_reference':by_code[code]['slide_pages'],
                           'testbank_reference':f'Testbank p. {item.page}', 'core_concept_tag':by_code[code]['section_title'],
                           'max_points':spec['points_each']}
                 letters = sorted(set(re.findall('[A-E]', keys[0]))) if keys else []
@@ -268,6 +285,7 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
             for code, entries in slots.items():
                 batches.extend((code, kind, spec['points_each'], entries[i:i+4]) for i in range(0,len(entries),4))
 
+        history.accept(fixed)
         gate = asyncio.Semaphore(PAPER_WORKERS)
         async def run(index, code, kind, points, slots):
             sec = by_code[code]
@@ -289,6 +307,9 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
                 lens = ('definitions and distinctions', 'application to a new scenario', 'incorrect reasoning and its correction',
                         'interpretation of results', 'relationships and tradeoffs')[(index-1) % 5]
                 instruction += f' Emphasize {lens} for the new items, within the supplied scope.'
+                instruction += ' Write distinct problems testing new scenarios or reasoning. Do not reuse a question by changing its format, option order or wording.'
+                if history.examples:
+                    instruction += ' Examples of previous questions to avoid (data): ' + json.dumps(history.examples[-12:], ensure_ascii=False)
             block = ('ASSIGNED TESTBANK QUESTIONS (source data):\n' + json.dumps(sources, ensure_ascii=False)) if sources else ''
             async with gate:
                 for attempt in range(2):
@@ -300,6 +321,7 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
                             q['section_code'] = code
                             if len(page_numbers(sec['slide_pages'])) == 1:
                                 q['slide_reference'] = sec['slide_pages']
+                            q.pop('_source', None)  # Provenance belongs to the server.
                             bank_id = q.pop('bank_id', None)
                             q.pop('testbank_reference', None)
                             if not assigned or bank_id is None or str(bank_id).strip().lower() in ('', 'none', 'null', 'n/a'):
@@ -307,6 +329,7 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
                             if bank_id not in assigned or bank_id in seen:
                                 raise ValueError('Unknown or repeated bank_id.')
                             _, item = assigned[bank_id]; seen.add(bank_id)
+                            q['_source'] = (item.stem, item.options)
                             if kind == 'mcq' and item.options:
                                 if not isinstance(q.get('options'),dict) or any(str(q['options'].get(k,'')).strip().casefold() != val.strip().casefold() for k,val in zip('ABCDE',item.options)):
                                     raise ValueError('Copy the supplied choices exactly at their original letters.')
@@ -328,8 +351,16 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
                             questions = from_bank + fresh[:len(slots)-len(from_bank)]
                         local_spec = {'distribution':{kind:{'count':len(slots),'points_each':points}},'total_points':len(slots)*points}
                         cls.validate_questions(questions, local_spec, scoped_sections)
+                        for q in questions:
+                            key = identity(q['prompt_markdown'], q.get('options'))
+                            if reserved.contains(key, except_key=identity(*q['_source']) if q.get('_source') else None):
+                                raise RepeatedQuestion('Use a different problem; this stem is reserved for a bank item.')
+                        # No await between checking and reserving: sibling batches see every accepted item.
+                        history.accept(questions)
                         return questions, provider, model
                     except (ValueError, KeyError, TypeError, AttributeError) as error:
+                        if attempt and isinstance(error, RepeatedQuestion):
+                            raise RepeatedQuestion('Could not fill the paper with unused questions. Select more sections or add new testbank material.') from error
                         if attempt: raise ValueError(f'Invalid {kind} batch: {error}') from error
                         instruction += f' Fix the previous validation error: {error}'
 
@@ -341,6 +372,7 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
         model_used = "original"
         for res in results:
             if isinstance(res, Exception):
+                if isinstance(res, RepeatedQuestion): raise res
                 if isinstance(res, ValueError):
                     raise ValueError(f'{res} No incomplete paper was saved.') from res
                 raise ValueError("An assessment batch failed. No incomplete paper was saved; please retry.") from res
@@ -399,15 +431,15 @@ Return JSON with: question_type, core_concept_tag, slide_reference, prompt_markd
         if counts != Counter({kind: spec["count"] for kind, spec in expected.items()}):
             raise ValueError("Question counts do not match the requested assessment.")
         codes = {sec["section_code"]: set(page_numbers(sec["slide_pages"])) for sec in sections}
-        prompts = set()
+        prompts = QuestionHistory()
         for q in questions:
             kind = q["question_type"]
             if kind not in ("mcq_single", "mcq_multi", "short_answer", "calculation"):
                 raise ValueError("Invalid question type.")
             prompt = str(q.get("prompt_markdown", "")).strip()
-            if not prompt or prompt.casefold() in prompts or not str(q.get("correct_answer", "")).strip():
-                raise ValueError("Missing or duplicate question, or missing answer key.")
-            prompts.add(prompt.casefold())
+            if not prompt or not str(q.get("correct_answer", "")).strip():
+                raise ValueError("Missing question or answer key.")
+            prompts.accept([q])
             code = q.get("section_code")
             if code not in codes or not set(page_numbers(q.get("slide_reference", ""))) <= codes[code]:
                 raise ValueError("Question source reference is outside the selected section.")
