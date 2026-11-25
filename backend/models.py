@@ -98,6 +98,18 @@ class QuestionRecord(Base):
     session = relationship("ExamSession", back_populates="questions")
     section = relationship("ChapterSection", back_populates="question_records")
 
+class PaperSectionSnapshot(Base):
+    __tablename__ = "paper_section_snapshots"
+    session_id = Column(Integer, ForeignKey("exam_sessions.id", ondelete="CASCADE"), primary_key=True)
+    sections_json = Column(Text, nullable=False)
+
+
+class QuestionSource(Base):
+    __tablename__ = "question_sources"
+    question_id = Column(Integer, ForeignKey("question_records.id", ondelete="CASCADE"), primary_key=True)
+    source_json = Column(Text, nullable=False)  # Original bank stem and choices before adaptation
+
+
 class ChoiceExplanation(Base):
     __tablename__ = "choice_explanations"
     question_id = Column(Integer, ForeignKey("question_records.id", ondelete="CASCADE"), primary_key=True)
