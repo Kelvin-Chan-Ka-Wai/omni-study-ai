@@ -10,7 +10,17 @@ export interface SlideSection {
   is_mastered: boolean;
 }
 
+export interface HistorySection {
+  id: number | null;
+  section_code: string | null;
+  section_title: string | null;
+  slide_pages: string | null;
+  question_count: number;
+  answered_count: number;
+}
+
 export interface StudyHistoryItem {
+  sections?: HistorySection[];
   session_id: number;
   mode: 'section_quiz' | 'mock_test' | 'midterm' | 'final';
   status: string;
