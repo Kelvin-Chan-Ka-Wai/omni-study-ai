@@ -76,6 +76,7 @@ export function App() {
   const [imagePaths, setImagePaths] = useState<Record<number, string>>({});
   const [timeSpentSeconds, setTimeSpentSeconds] = useState(0);
   const [draftState, setDraftState] = useState('');
+  const [savedDraftVersion, setSavedDraftVersion] = useState(0);
   const [isExamSubmitted, setIsExamSubmitted] = useState(false);
   const [submittingExam, setSubmittingExam] = useState(false);
   const submittingRef = useRef(false);
@@ -212,10 +213,20 @@ export function App() {
     if (!activeExam.is_paused && activeExam.deadline_at && Date.now() >= new Date(activeExam.deadline_at).getTime()) return;
     localStorage.setItem(`omnistudy-draft-${activeExam.session_id}`, JSON.stringify({ mcq: mcqSelections, written: writtenAnswers }));
     const timer = setTimeout(() => {
-      OmniStudyAPI.saveDraft(activeExam.session_id,payloadRef.current,timeSpentSeconds).then(()=>setDraftState('Answers saved')).catch(()=>setDraftState('Autosave unavailable or writing time ended. Last saved draft is preserved.'));
+      OmniStudyAPI.saveDraft(activeExam.session_id,payloadRef.current,timeSpentSeconds).then(()=>{setDraftState('Answers saved');setSavedDraftVersion(v => v + 1);}).catch(()=>setDraftState('Autosave unavailable or writing time ended. Last saved draft is preserved.'));
     }, 650);
     return () => clearTimeout(timer);
   }, [activeExam?.session_id, mcqSelections, writtenAnswers, imagePaths, isExamSubmitted]);
+
+  useEffect(() => {
+    const id = activeChapter?.id;
+    if (!id || activeTab !== 'history') return;
+    let current = true;
+    OmniStudyAPI.getChapterDetail(id).then(detail => {
+      if (current) setActiveChapter(ch => ch?.id === id ? {...ch, study_history: detail.study_history} : ch);
+    }).catch(() => {});
+    return () => { current = false; };
+  }, [activeTab, activeChapter?.id, savedDraftVersion]);
 
   const handleDeleteChapter = async (
     e: React.MouseEvent,
@@ -1166,7 +1177,7 @@ export function App() {
                 {activeChapter.study_history?.map((h) => (
                   <div
                     key={h.session_id}
-                    className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-xs"
+                    className="flex flex-wrap items-start justify-between gap-4 rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-xs"
                   >
                     <div className="space-y-1">
                       <span className="rounded bg-indigo-500/20 px-2 py-0.5 font-bold uppercase text-indigo-300">
@@ -1181,6 +1192,16 @@ export function App() {
                         }}>{lockedPaper(h.status) ? 'Review results' : 'Open / resume'}</button>
                         Started: {new Date(h.started_at).toLocaleString()}
                       </div>
+                      <div className="pt-2 font-semibold text-slate-200">Sections in this attempt</div>
+                      {h.sections?.length ? <ul className="space-y-1 text-slate-300">
+                        {h.sections.map(s => <li key={s.id ?? 'unknown'}>
+                          <span className="font-medium">{[s.section_code, s.section_title].filter(Boolean).join(' · ') || 'Section not recorded'}</span>
+                          {s.slide_pages && <span className="text-slate-400"> · {/^slides?\b/i.test(s.slide_pages) ? s.slide_pages : `Slides ${s.slide_pages}`}</span>}
+                          <span className="block text-slate-400">{s.question_count
+                            ? `${s.answered_count} of ${s.question_count} ${s.question_count === 1 ? 'question' : 'questions'} answered`
+                            : 'Selected · no questions linked'}</span>
+                        </li>)}
+                      </ul> : <div className="text-slate-400">Section information was not recorded for this attempt.</div>}
                     </div>
                     <div className="flex items-center gap-3">
                       <div className="text-right">
