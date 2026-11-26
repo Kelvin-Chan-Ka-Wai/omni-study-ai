@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from database import STORAGE_DIR, get_db
 from models import Chapter, ChapterSection, ExamSession, QuestionRecord, PaperSectionSnapshot, WrongQuestionBank, NoteVersion, SlideTranscription, GenerationJob
 from services.documents import DOCUMENT_SUFFIXES, VISUAL_ONLY, DocumentReadError, read_pages, resolve_local_upload
+from services.mastery import Progress, course_key, course_chapters
 from services.scope import selected_sections, page_numbers, section_order
 from services.slide_outline import build_outline, format_slide_pages, review_slides
 import uuid
@@ -78,6 +79,7 @@ def _reference_has_text(path: Path, label: str) -> bool:
 @router.get("")
 def list_chapters(db: Session = Depends(get_db)):
     chapters = db.query(Chapter).order_by(Chapter.created_at.desc()).all()
+    progress = Progress(db, chapters)
     result = []
     for ch in chapters:
         active_wrong = (
@@ -88,11 +90,12 @@ def list_chapters(db: Session = Depends(get_db)):
         result.append({
             "id": ch.id,
             "course_name": ch.course_name,
+            "course_key": course_key(ch.course_name),
             "chapter_title": ch.chapter_title,
             "slide_file_path": ch.slide_file_path,
             "textbook_file_path": ch.textbook_file_path,
             "testbank_file_path": getattr(ch, "testbank_file_path", None),
-            "progress_percentage": ch.progress_percentage,
+            "progress_percentage": progress.percent_mastered(ch),
             "active_wrong_count": active_wrong,
             "created_at": ch.created_at,
             "sections": [
@@ -104,7 +107,8 @@ def list_chapters(db: Session = Depends(get_db)):
                     "best_accuracy": s.best_accuracy,
                     "latest_accuracy": s.latest_accuracy,
                     "quiz_attempts": s.quiz_attempts,
-                    "is_mastered": s.is_mastered,
+                    "average_percent": progress.section(s.id)["average_percent"],
+                    "is_mastered": progress.section(s.id)["mastered"],
                 }
                 for s in sorted(ch.sections, key=section_order) if not s.is_archived
             ],
@@ -183,6 +187,7 @@ def onboard_chapter_with_files(
         result = {
             "chapter_id": chapter.id,
             "course_name": chapter.course_name,
+        "course_key": course_key(chapter.course_name),
             "chapter_title": chapter.chapter_title,
             "slide_url": chapter.slide_file_path,
             "testbank_url": chapter.testbank_file_path,
@@ -317,9 +322,10 @@ def _history_sections(db, chapter, history):
     """Reconstruct older papers without rewriting them; newer papers keep their original labels."""
     current = {s.id: {k: getattr(s, k) for k in ("id", "section_code", "section_title", "slide_pages")}
                for s in sorted(chapter.sections, key=section_order)}
+    exam_ids = [h.id for h in history]
     snapshots = dict(db.query(PaperSectionSnapshot.session_id, PaperSectionSnapshot.sections_json)
                      .join(ExamSession, ExamSession.id == PaperSectionSnapshot.session_id)
-                     .filter(ExamSession.chapter_id == chapter.id).all())
+                     .filter(ExamSession.id.in_(exam_ids)).all())
     def has_answer(value):
         if isinstance(value, list):
             return any(has_answer(v) for v in value)
@@ -327,12 +333,15 @@ def _history_sections(db, chapter, history):
 
     drafts = {h.id: {a['question_id'] for a in json.loads(h.draft_json or '[]')
                      if has_answer(a.get('user_answer')) or has_answer(a.get('corrected_transcription'))} for h in history}
-    counts = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    counts = defaultdict(lambda: defaultdict(lambda: [0, 0, 0., 0.]))
     rows = (db.query(QuestionRecord.session_id, QuestionRecord.section_id, QuestionRecord.id,
-                     QuestionRecord.user_answer, QuestionRecord.handwritten_image_path.is_not(None))
-            .join(ExamSession).filter(ExamSession.chapter_id == chapter.id))
-    for session, sid, qid, answer, uploaded in rows:
+                     QuestionRecord.user_answer, QuestionRecord.handwritten_image_path.is_not(None),
+                     QuestionRecord.score_awarded, QuestionRecord.max_points)
+            .join(ExamSession).filter(ExamSession.id.in_(exam_ids)))
+    for session, sid, qid, answer, uploaded, earned, possible in rows:
         pair = counts[session][sid]
+        pair[2] += earned or 0
+        pair[3] += possible or 0
         pair[0] += 1
         pair[1] += int(uploaded or qid in drafts[session] or has_answer(answer))
     result = {}
@@ -344,9 +353,9 @@ def _history_sections(db, chapter, history):
         ordered = dict.fromkeys([*selected, *(sid for sid in meta if sid in linked), *linked])
         result[h.id] = []
         for sid in ordered:
-            count, answered = counts[h.id].get(sid, (0, 0))
+            count, answered, earned, possible = counts[h.id].get(sid, (0, 0, 0, 0))
             section = meta.get(sid, {'id': sid, 'section_code': None, 'section_title': None, 'slide_pages': None})
-            result[h.id].append({**section, 'question_count': count, 'answered_count': answered})
+            result[h.id].append({**section, 'question_count': count, 'answered_count': answered, 'earned': round(earned, 2) if h.status == 'completed' else None, 'possible': round(possible, 2)})
     return result
 
 
@@ -356,9 +365,12 @@ def get_chapter_detail(chapter_id: int, db: Session = Depends(get_db)):
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found")
 
+    cohort = course_chapters(db, chapter)
+    progress = Progress(db, cohort)
     history = (
         db.query(ExamSession)
-        .filter(ExamSession.chapter_id == chapter_id)
+        .filter((ExamSession.chapter_id == chapter_id) | ExamSession.id.in_(
+            db.query(QuestionRecord.session_id).join(ChapterSection).filter(ChapterSection.chapter_id == chapter_id)))
         .order_by(ExamSession.started_at.desc())
         .all()
     )
@@ -378,17 +390,20 @@ def get_chapter_detail(chapter_id: int, db: Session = Depends(get_db)):
             "best_accuracy": s.best_accuracy,
             "latest_accuracy": s.latest_accuracy,
             "quiz_attempts": s.quiz_attempts,
-            "is_mastered": s.is_mastered,
+            "average_percent": progress.section(s.id)["average_percent"],
+            "is_mastered": progress.section(s.id)["mastered"],
         }
 
     return {
         "id": chapter.id,
         "course_name": chapter.course_name,
+        "course_key": course_key(chapter.course_name),
         "chapter_title": chapter.chapter_title,
         "slide_file_path": chapter.slide_file_path,
         "textbook_file_path": chapter.textbook_file_path,
         "testbank_file_path": getattr(chapter, "testbank_file_path", None),
-        "progress_percentage": chapter.progress_percentage,
+        "progress_percentage": progress.percent_mastered(chapter),
+        "course_progress": progress.report(),
         "sections": [section_data(s) for s in sorted(chapter.sections, key=section_order) if not s.is_archived],
         "archived_sections": [section_data(s) for s in sorted(chapter.sections, key=lambda s: s.id)
                               if s.is_archived and (s.extracted_study_notes or s.quiz_attempts or s.id in archived_with_history)],

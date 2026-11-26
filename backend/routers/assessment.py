@@ -15,7 +15,7 @@ from services import choice_review
 from services.question_history import QuestionHistory, RepeatedQuestion
 from services.documents import resolve_local_upload
 from services.slide_outline import review_slides
-from services.scope import selected_sections
+from services.scope import exam_sections, page_numbers
 from services.scoring_engine import ScoringEngine
 from services.slide_scope_rag import SlideScopeRAG
 from services.vision_grader import VisionSolutionGrader
@@ -31,6 +31,7 @@ class GenerateAssessmentRequest(BaseModel):
     mode: str = "section_quiz"  # 'section_quiz' | 'mock_test' | 'midterm' | 'final'
     section_ids: list[int] | None = None
     all_sections: bool = False
+    exam_pages: dict[int, str] | None = None
 
 
 class TimerStateUpdate(BaseModel):
@@ -67,28 +68,43 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
 
     if req.mode not in ScoringEngine.EXAM_BLUEPRINTS:
         raise HTTPException(400, "Choose a supported assessment mode.")
-    sections = selected_sections(db, req.chapter_id, req.section_ids, req.all_sections)
-    source_path = resolve_local_upload(STORAGE_DIR, chapter.slide_file_path)
-    if not source_path:
-        raise HTTPException(400, "Source slides are missing. Upload the lecture again.")
-    slides = SlideScopeRAG.extract_slides_text(source_path)
-    overrides = {r.page: r.text for r in db.query(SlideTranscription).filter_by(chapter_id=chapter.id)}
-    slides = review_slides([{**slide, "text": overrides.get(slide["slide_number"], slide["text"]),
-                             "verified": slide["slide_number"] in overrides} for slide in slides])
-    scoped_dicts = []
-    for sec in sections:
-        page_ref, evidence = SlideScopeRAG.scoped_slide_evidence(slides, sec.slide_pages)
-        scoped_dicts.append({"id": sec.id, "section_code": sec.section_code, "section_title": sec.section_title,
-                             "slide_pages": page_ref, "source_text": evidence})
-
-    tb_path = resolve_local_upload(STORAGE_DIR, chapter.testbank_file_path)
-
-    snapshot = [{k: getattr(section, k) for k in ("id", "section_code", "section_title", "slide_pages")} for section in sections]
+    selected = exam_sections(db, chapter, req.section_ids, req.mode, req.exam_pages, req.all_sections)
+    explicit = req.exam_pages is not None
+    blueprint = ScoringEngine.EXAM_BLUEPRINTS[req.mode]
+    if explicit and len(selected) > sum(t['count'] for t in blueprint['distribution'].values()):
+        raise HTTPException(400, 'Select no more sections than there are questions so each section can be tested.')
     course = chapter.course_name
+    decks, scoped_dicts, snapshot, codes, banks = {}, [], [], {}, {}
+    history = QuestionHistory.load(db, course, chapter.testbank_file_path)
+    for sec, requested_pages in selected:
+        deck = sec.chapter
+        if deck.id not in decks:
+            path = resolve_local_upload(STORAGE_DIR, deck.slide_file_path)
+            if not path: raise HTTPException(400, f'Source slides missing for {deck.chapter_title}.')
+            slides = SlideScopeRAG.extract_slides_text(path)
+            overrides = {r.page: r.text for r in db.query(SlideTranscription).filter_by(chapter_id=deck.id)}
+            decks[deck.id] = review_slides([{**slide, 'text':overrides.get(slide['slide_number'], slide['text']),
+                                            'verified':slide['slide_number'] in overrides} for slide in slides])
+        ref, evidence = SlideScopeRAG.scoped_slide_evidence(decks[deck.id], requested_pages)
+        code = f'D{deck.id}-S{sec.id}' if explicit else sec.section_code
+        codes[code.lower()] = sec.id
+        scoped_dicts.append(dict(id=sec.id, section_code=code, section_title=sec.section_title, slide_pages=ref,
+                                 source_text=evidence, narrow=page_numbers(ref) != page_numbers(sec.slide_pages)))
+        snapshot.append(dict(id=sec.id, section_code=sec.section_code, section_title=sec.section_title,
+                             slide_pages=ref if explicit else sec.slide_pages, chapter_id=deck.id, chapter_title=deck.chapter_title))
+        if explicit and deck.testbank_file_path:
+            banks.setdefault(deck.testbank_file_path, set()).add(code)
+    bank_inputs = []
+    for ref, allowed in banks.items():
+        path = resolve_local_upload(STORAGE_DIR, ref)
+        if path: bank_inputs.append((path, allowed, QuestionHistory.load(db, course, ref)))
+    exam_title = ' / '.join(dict.fromkeys(s['chapter_title'] for s in snapshot)) if explicit else chapter.chapter_title
+    tb_path = resolve_local_upload(STORAGE_DIR, chapter.testbank_file_path)
     try:
         generated = await SlideScopeRAG.generate_scoped_assessment(
-            course_name=course, chapter_title=chapter.chapter_title, scoped_sections=scoped_dicts,
-            mode=req.mode, testbank_file_path=tb_path, history=QuestionHistory.load(db, course, chapter.testbank_file_path),
+            course_name=course, chapter_title=exam_title, scoped_sections=scoped_dicts,
+            mode=req.mode, testbank_file_path=tb_path, history=history,
+            **({"exam_banks": bank_inputs} if explicit else {}),
         )
     except RepeatedQuestion as error:
         raise HTTPException(422, str(error)) from error
@@ -101,6 +117,8 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
     except RepeatedQuestion:
         db.rollback()
         raise HTTPException(409, 'A question was already used. No paper was saved. Generate another paper or broaden the selected sections.') from None
+    if explicit and {str(q.get('section_code', '')).lower() for q in generated['questions']} != set(codes):
+        raise HTTPException(422, 'The paper did not cover every selected section. No paper was saved.')
     blueprint = generated["blueprint"]
     exam = ExamSession(
         chapter_id=chapter.id,
@@ -117,7 +135,7 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
 
     # Map section_code -> section.id so mastery updates link back to exact slide sections
     db.add(PaperSectionSnapshot(session_id=exam.id, sections_json=json.dumps(snapshot, ensure_ascii=False)))
-    code_to_sec_id = {s["section_code"].lower(): s["id"] for s in snapshot}
+    code_to_sec_id = codes
 
     saved_questions = []
     for q in generated["questions"]:
@@ -133,7 +151,7 @@ async def generate_assessment(req: GenerateAssessmentRequest, db: Session = Depe
             section_id=matched_sec_id,
             question_type=q.get("question_type", "mcq_single"),
             core_concept_tag=q.get("core_concept_tag", "Slide Concept"),
-            slide_reference=q.get("slide_reference", "Lecture Slides"),
+            slide_reference=(next(s["chapter_title"] for s in snapshot if s["id"] == matched_sec_id) + " · " if explicit else "") + q.get("slide_reference", "Lecture Slides"),
             testbank_reference=q.get('testbank_reference'),
             prompt_markdown=q.get("prompt_markdown", ""),
             options_json=opts_json,
@@ -495,7 +513,7 @@ async def grade_claimed(session_id, db, claimed_status, failure_status):
         wrong_count = 0
         for q, answer, score, feedback in results:
             q.user_answer, q.score_awarded, q.ai_feedback_and_solution = answer, score, feedback
-            if ScoringEngine.sync_wrong_question_bank(db, exam.chapter_id, q, commit=False): wrong_count += 1
+            if ScoringEngine.sync_wrong_question_bank(db, q.section.chapter_id if q.section else exam.chapter_id, q, commit=False): wrong_count += 1
             graded.append({"question_id": q.id, "user_answer": answer, "correct_answer": q.correct_answer, "score_awarded": score,
                 "max_points": q.max_points, "ai_feedback_and_solution": feedback, "is_flagged_wrong": q.is_flagged_wrong})
         summary = ScoringEngine.update_section_and_chapter_mastery(db, session_id, commit=False)

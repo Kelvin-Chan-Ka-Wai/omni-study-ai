@@ -1,11 +1,13 @@
 import json
+from typing import Literal
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from config import settings
 from database import get_db
-from models import WrongQuestionBank
+from models import Chapter, WrongQuestionBank
+from services.mastery import course_chapters
 from services.llm_harness import HybridLLMHarness
 from services.scoring_engine import ScoringEngine
 from services.slide_scope_rag import SlideScopeRAG
@@ -20,6 +22,7 @@ class AttemptWrongRequest(BaseModel):
 class WrongItemResponse(BaseModel):
     id: int
     chapter_id: int
+    chapter_title: str | None = None
     section_id: int | None = None
     question_type: str
     core_concept_tag: str
@@ -70,6 +73,7 @@ def _serialize_wrong_item(item: WrongQuestionBank) -> dict:
     return {
         "id": item.id,
         "chapter_id": item.chapter_id,
+        "chapter_title": item.chapter.chapter_title if item.chapter else None,
         "section_id": getattr(item, "section_id", None),
         "question_type": item.question_type or "mcq_single",
         "core_concept_tag": item.core_concept_tag or "Slide Concept",
@@ -98,9 +102,13 @@ def _serialize_wrong_item(item: WrongQuestionBank) -> dict:
 def list_wrong_questions(
     chapter_id: int,
     status: str = Query("active", pattern="^(active|graduated|all)$"),
+    scope: Literal["chapter", "course"] = "chapter",
     db: Session = Depends(get_db),
 ):
-    query = db.query(WrongQuestionBank).filter(WrongQuestionBank.chapter_id == chapter_id)
+    chapter = db.get(Chapter, chapter_id)
+    if not chapter: raise HTTPException(404, 'Chapter not found')
+    ids = [c.id for c in course_chapters(db, chapter)] if scope == 'course' else [chapter_id]
+    query = db.query(WrongQuestionBank).filter(WrongQuestionBank.chapter_id.in_(ids))
     if status != "all":
         query = query.filter(WrongQuestionBank.status == status)
     items = query.order_by(WrongQuestionBank.id.desc()).all()

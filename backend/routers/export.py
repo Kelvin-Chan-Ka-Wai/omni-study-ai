@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response, PlainTextResponse
 from services.pdf_renderer import render_pdf
+from services.mastery import Progress, course_chapters
+from typing import Literal
 from services.scope import selected_sections
 from sqlalchemy.orm import Session
 from database import get_db
@@ -27,7 +29,7 @@ async def export_chapter_notes(
     except ValueError:
         raise HTTPException(400, "Invalid section selection")
     sections = selected_sections(db, chapter_id, ids, all_sections, include_archived=True)
-    content = AcademicExporter.export_chapter_study_guide(chapter, sections, fmt=fmt)
+    content = AcademicExporter.export_chapter_study_guide(chapter, sections, fmt=fmt, progress=Progress(db, [chapter]))
     if fmt == "pdf":
         return Response(content=await render_pdf(content), media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="omnistudy.pdf"'})
     ext = "tex" if fmt == "tex" else "md"
@@ -64,19 +66,21 @@ async def export_exam_paper(
 async def export_wrong_bank_sheet(
     chapter_id: int,
     fmt: str = Query("md", pattern="^(md|tex|pdf)$"),
+    scope: Literal["chapter", "course"] = "chapter",
     db: Session = Depends(get_db),
 ):
     chapter = db.query(Chapter).filter(Chapter.id == chapter_id).first()
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found")
+    names = {c.id: c.chapter_title for c in (course_chapters(db, chapter) if scope == "course" else [chapter])}
     items = (
         db.query(WrongQuestionBank)
-        .filter(WrongQuestionBank.chapter_id == chapter_id)
+        .filter(WrongQuestionBank.chapter_id.in_(names)).order_by(WrongQuestionBank.id)
         .all()
     )
-    content = AcademicExporter.export_wrong_question_bank(chapter, items, fmt=fmt)
+    content = AcademicExporter.export_wrong_question_bank(chapter, items, fmt=fmt, source_names=names if scope == "course" else None)
     if fmt == "pdf":
         return Response(content=await render_pdf(content), media_type="application/pdf", headers={"Content-Disposition": 'attachment; filename="omnistudy.pdf"'})
     ext = "tex" if fmt == "tex" else "md"
-    headers = {"Content-Disposition": f'attachment; filename="wrong_bank_ch_{chapter_id}.{ext}"'}
+    headers = {"Content-Disposition": f'attachment; filename="wrong_bank_{scope}_{chapter_id}.{ext}"'}
     return PlainTextResponse(content=content, headers=headers)
