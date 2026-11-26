@@ -75,14 +75,20 @@ window.formulasReady=true;</script></body></html>"""
         chapter: Chapter,
         sections: list[ChapterSection],
         fmt: str = "md",
+        progress=None,
     ) -> str:
+        def label(s):
+            item = progress.section(s.id) if progress else None
+            if not item or not item['attempts']: return 'Not attempted'
+            return f"{'Mastered' if item['mastered'] else 'Needs practice'} · {item['average_percent']:g}% average"
+        pct = progress.percent_mastered(chapter) if progress else chapter.progress_percentage
         lines = [
             f"# {chapter.course_name} — {chapter.chapter_title}",
-            f"**Overall Chapter Mastery (Slide-Scoped, >=80% Gate):** {chapter.progress_percentage:.1f}%\n",
+            f"**Overall Chapter Mastery (sections with an average above 80%):** {pct:.1f}%\n",
             "---\n",
         ]
         for sec in sections:
-            badge = "Mastered" if sec.is_mastered else f"In Progress ({sec.best_accuracy * 100:.0f}%)"
+            badge = label(sec)
             lines.append(f"## {sec.section_code}: {sec.section_title} ({sec.slide_pages}) — [{badge}]\n")
             lines.append(normalize_study_math(sec.extracted_study_notes or "") or "_No notes extracted._")
             lines.append("\n\n---\n")
@@ -93,16 +99,17 @@ window.formulasReady=true;</script></body></html>"""
         if fmt == "pdf":
             return cls.render_printable_katex_pdf_html(
                 title=f"{chapter.course_name} — {chapter.chapter_title} (Study Notes)",
-                subtitle=f"Slide-Scoped Study Guide • Mastery: {chapter.progress_percentage:.1f}%",
+                subtitle=f"Slide-Scoped Study Guide • Mastery: {pct:.1f}%",
                 markdown_body=md_doc,
             )
 
         body = []
         for sec in sections:
             notes_tex = cls._md_to_latex_safe(normalize_study_math(sec.extracted_study_notes or ""))
+            badge_tex = label(sec).replace("%", r"\%")
             body.append(
                 f"\\section{{{sec.section_code}: {sec.section_title} ({sec.slide_pages})}}\n"
-                f"\\textit{{Best Quiz Accuracy: {sec.best_accuracy * 100:.0f}\\%}}\\par\\medskip\n"
+                f"\\textit{{{badge_tex}}}\\par\\medskip\n"
                 f"{notes_tex}\n\\bigskip"
             )
 
@@ -215,15 +222,19 @@ window.formulasReady=true;</script></body></html>"""
         chapter: Chapter,
         wrong_items: list[WrongQuestionBank],
         fmt: str = "md",
+        source_names=None,
     ) -> str:
+        title = f'{chapter.course_name} · all chapters' if source_names is not None else f'{chapter.course_name}: {chapter.chapter_title}'
+        def topic(item):
+            return f'{source_names[item.chapter_id]} · {item.core_concept_tag}' if source_names is not None else item.core_concept_tag
         lines = [
-            f"# Wrong Question Collection (錯題本) — {chapter.course_name}: {chapter.chapter_title}",
+            f"# Wrong Question Collection (錯題本) — {title}",
             f"**Total Tracked Questions:** {len(wrong_items)} (Graduates at 3/3 Consecutive Correct)\n",
             "---\n",
         ]
         for idx, item in enumerate(wrong_items, start=1):
             lines.append(
-                f"### #{idx} [{item.core_concept_tag}] — Streak: `{item.consecutive_correct_count}/3` ({item.status.upper()})\n"
+                f"### #{idx} [{topic(item)}] — Streak: `{item.consecutive_correct_count}/3` ({item.status.upper()})\n"
             )
             lines.append(f"**Slide Ref:** {item.slide_reference or 'N/A'} | **Type:** `{item.question_type}`\n")
             lines.append(item.prompt_markdown)
@@ -247,14 +258,14 @@ window.formulasReady=true;</script></body></html>"""
         if fmt == "pdf":
             return cls.render_printable_katex_pdf_html(
                 title=f"Wrong Question Collection — {chapter.course_name}",
-                subtitle=f"{chapter.chapter_title} ({len(wrong_items)} Questions)",
+                subtitle=f"{title} ({len(wrong_items)} Questions)",
                 markdown_body=md_doc,
             )
 
         blocks = []
         for idx, item in enumerate(wrong_items, start=1):
             blocks.append(
-                f"\\subsection*{{Mistake \\#{idx}: {cls._md_to_latex_safe(item.core_concept_tag)} "
+                f"\\subsection*{{Mistake \\#{idx}: {cls._md_to_latex_safe(topic(item))} "
                 f"[Streak: {item.consecutive_correct_count}/3 — {item.status.upper()}]}}\n"
                 f"{cls._md_to_latex_safe(item.prompt_markdown)}\n"
                 f"\\par\\medskip\\noindent\\textbf{{Your Wrong Answer:}} {cls._md_to_latex_safe(item.user_wrong_answer or '')}\\\\\n"
@@ -267,7 +278,7 @@ window.formulasReady=true;</script></body></html>"""
             "\\usepackage[utf8]{inputenc}\n"
             "\\usepackage{amsmath,amssymb}\n"
             "\\usepackage[margin=1in]{geometry}\n"
-            f"\\title{{Wrong Question Bank: {chapter.course_name} — {chapter.chapter_title}}}\n"
+            f"\\title{{Wrong Question Bank: {cls._md_to_latex_safe(title)}}}\n"
             "\\date{\\today}\n"
             "\\begin{document}\n"
             "\\maketitle\n"

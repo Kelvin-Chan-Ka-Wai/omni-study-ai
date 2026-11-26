@@ -1,3 +1,4 @@
+from dataclasses import replace
 import asyncio
 import json
 import re
@@ -216,6 +217,7 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
         mode: str = "section_quiz",
         testbank_file_path: str | Path | None = None,
         history: QuestionHistory | None = None,
+        exam_banks=None,
     ) -> dict:
         """Reserve assessment slots for distinct, in-scope bank items before filling gaps."""
         blueprint = ScoringEngine.EXAM_BLUEPRINTS.get(
@@ -227,12 +229,22 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
             raise ValueError("No source evidence for the selected sections.")
         if any(len(s['source_text']) > 24000 for s in scoped_sections):
             raise ValueError('A selected section is too large; split its slide range before generating.')
-        items = bank_items(testbank_file_path) if testbank_file_path else []
+        allowed = None
+        if exam_banks is None:
+            items = bank_items(testbank_file_path) if testbank_file_path else []
+        else:
+            items, allowed = [], {}
+            for i, (path, codes, old) in enumerate(exam_banks):
+                bank = bank_items(path); skip = old.untraceable_pages(bank)
+                for original in bank:
+                    if original.page in skip: continue
+                    item = replace(original, id=f'{i}-{original.id}')
+                    items.append(item); allowed[item.id] = codes
         history = history if history is not None else QuestionHistory()
         # Filter history before ranking, so unused bank problems keep first priority.
         unique_bank = QuestionHistory()
         available = []
-        skip_pages = history.untraceable_pages(items)
+        skip_pages = history.untraceable_pages(items) if exam_banks is None else set()
         for item in items:
             if item.page in skip_pages:
                 continue
@@ -240,7 +252,8 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
             if not history.contains(key) and not unique_bank.contains(key):
                 available.append(item)
                 unique_bank.add(key)
-        plan = bank_plan(available, scoped_sections, dist)
+        plan = bank_plan(available, scoped_sections, dist, allowed=allowed, cover_all=exam_banks is not None)
+        all_coverage = Counter(code for entries in plan.values() for code, _ in entries)
         reserved = QuestionHistory()
         for entries in plan.values():
             for _, item in entries: reserved.add(identity(item.stem, item.options))
@@ -275,7 +288,7 @@ Return ONLY a JSON object with key "questions" containing a list of question obj
                                   'solution_explanation':f'Testbank answer: {answer}. '+task})
                 else:
                     pending.append((code, item))
-            coverage = Counter(code for code,_ in plan[kind])
+            coverage = all_coverage if exam_banks is not None else Counter(code for code,_ in plan[kind])
             slots = {code:[] for code in by_code}
             for code,item in pending:
                 slots[code].append(item)

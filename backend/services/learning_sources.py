@@ -220,7 +220,8 @@ def _parsed_bank(version):
     return items
 
 
-def bank_plan(items, sections, distribution):
+def bank_plan(items, sections, distribution, *, allowed=None, cover_all=False):
+    narrow = {s["section_code"] for s in sections if s.get("narrow")} if cover_all else set()
     scopes = [(s['section_code'], terms(s['section_title']), terms(s['source_text']), re.match(r'(\d+\.\d+)\b', s['section_title'])) for s in sections]
     matched = []
     for item in items:
@@ -228,6 +229,8 @@ def bank_plan(items, sections, distribution):
         scores = []
         label = re.match(r'(\d+\.\d+)\b', item.topic)
         for code, title, evidence, heading in scopes:
+            if allowed is not None and code not in allowed[item.id]: continue
+            if code in narrow and len(cues & evidence) < 2: continue
             if label and heading and label[1].split('.')[0] == heading[1].split('.')[0] and label[1] != heading[1]:
                 continue
             if topic and title and len(topic & title) / len(topic | title) >= .7:
@@ -244,9 +247,13 @@ def bank_plan(items, sections, distribution):
     def take(kind, predicate):
         while len(plan[kind]) < distribution[kind]['count']:
             eligible = [row for row in matched if row[2].id not in used and predicate(row[2])]
+            if cover_all:
+                empty = {code for code, *_ in scopes if not per_section[code]}
+                remaining = sum(spec['count'] for spec in distribution.values()) - len(used)
+                if remaining <= len(empty): eligible = [r for r in eligible if r[1] in empty]
             if not eligible:
                 break
-            _, code, item = max(eligible, key=lambda r: (r[0] >= 100, -per_section[r[1]], r[0]))
+            _, code, item = max(eligible, key=lambda r: (cover_all and not per_section[r[1]], r[0] >= 100, -per_section[r[1]], r[0]))
             plan[kind].append((code, item)); used.add(item.id); per_section[code] += 1
     for kind in ('calculation', 'short_answer'):
         take(kind, lambda b, k=kind: b.kind == k)
