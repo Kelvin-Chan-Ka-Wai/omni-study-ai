@@ -188,8 +188,8 @@ export const OmniStudyAPI = {
     return generateJob({ kind: 'notes', chapter_id: chapterId, section_ids: sectionIds || [] });
   },
 
-  async generateAssessment(chapterId: number, mode: 'section_quiz' | 'mock_test' | 'midterm' | 'final', sectionIds: number[]): Promise<ActiveExamSession> {
-    return generateJob({ kind: 'assessment', chapter_id: chapterId, mode, section_ids: sectionIds });
+  async generateAssessment(chapterId: number, mode: 'section_quiz' | 'mock_test' | 'midterm' | 'final', sectionIds: number[], examPages?: Record<number,string>): Promise<ActiveExamSession> {
+    return generateJob({ kind: 'assessment', chapter_id: chapterId, mode, section_ids: sectionIds, exam_pages: examPages });
   },
 
   async pasteClipboardImage(sessionId: number, questionId: number, imageBase64: string) {
@@ -230,7 +230,7 @@ export const OmniStudyAPI = {
     status: 'active' | 'graduated' = 'active'
   ): Promise<WrongQuestionItem[]> {
     const { data } = await api.get(`/api/wrong-bank/${chapterId}`, {
-      params: { status },
+      params: { status, scope: 'course' },
     });
     return data;
   },
@@ -279,6 +279,6 @@ export const OmniStudyAPI = {
     if (type === 'chapter') {
       return `${BACKEND_URL}/api/export/chapter/${id}?fmt=${fmt}&section_ids=${(sectionIds || []).join(',')}`;
     }
-    return `${BACKEND_URL}/api/export/${type}/${id}?fmt=${fmt}`;
+    return `${BACKEND_URL}/api/export/${type}/${id}?fmt=${fmt}&scope=course`;
   },
 };
