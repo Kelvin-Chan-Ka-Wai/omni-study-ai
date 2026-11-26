@@ -1,9 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { ExamScopePicker, ProgressPanel, courseKey } from './components/AssessmentProgress';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import {
   BookOpen,
+  Folder,
   FileUp,
   CheckCircle2,
   AlertCircle,
@@ -41,6 +43,10 @@ const NoteMarkdown = React.memo(function NoteMarkdown({ text }: { text: string }
 
 export function App() {
   const [chapters, setChapters] = useState<ChapterSummary[]>([]);
+  const [foldedCourses,setFoldedCourses] = useState<Record<string,boolean>>(()=>{try{return JSON.parse(localStorage.getItem('omnistudy-folded-courses')||'{}')||{}}catch{return {}}});
+  const folders = new Map<string, ChapterSummary[]>();
+  for(const ch of chapters){const k=ch.course_key??courseKey(ch.course_name);const group=folders.get(k)??[];group.push(ch);folders.set(k,group)}
+  const toggleFolder=(k:string)=>{const next={...foldedCourses,[k]:!foldedCourses[k]};setFoldedCourses(next);try{localStorage.setItem('omnistudy-folded-courses',JSON.stringify(next))}catch{/* optional */}};
   const [activeChapter, setActiveChapter] = useState<ChapterSummary | null>(null);
   const [selectedSectionIds, setSelectedSectionIds] = useState<number[]>([]);
   const [activeTab, setActiveTab] = useState<'study' | 'exam' | 'wrong_bank' | 'history'>('study');
@@ -67,6 +73,7 @@ export function App() {
   const [cleaningNotes, setCleaningNotes] = useState(false);
 
   // Exam state
+  const [showExamScope, setShowExamScope] = useState(false);
   const [examMode, setExamMode] = useState<'section_quiz' | 'mock_test' | 'midterm' | 'final'>('section_quiz');
   const [generatingExam, setGeneratingExam] = useState(false);
   const [genSeconds, setGenSeconds] = useState(0);
@@ -223,7 +230,7 @@ export function App() {
     if (!id || activeTab !== 'history') return;
     let current = true;
     OmniStudyAPI.getChapterDetail(id).then(detail => {
-      if (current) setActiveChapter(ch => ch?.id === id ? {...ch, study_history: detail.study_history} : ch);
+      if (current) setActiveChapter(ch => ch?.id === id ? {...ch, study_history: detail.study_history, course_progress: detail.course_progress} : ch);
     }).catch(() => {});
     return () => { current = false; };
   }, [activeTab, activeChapter?.id, savedDraftVersion]);
@@ -318,15 +325,16 @@ export function App() {
     }
   };
 
-  const handleStartAssessment = async () => {
-    if (!activeChapter || selectedSectionIds.length === 0) return;
+  const handleStartAssessment = async (pages?: Record<number,string>) => {
+    const ids = pages ? Object.keys(pages).map(Number) : selectedSectionIds;
+    if (!activeChapter || ids.length === 0) return;
     if (activeExam && !isExamSubmitted && !window.confirm('Start a new paper? Your existing assessment remains saved and can be resumed from History.')) return;
     setGeneratingExam(true);
     try {
       const session = await OmniStudyAPI.generateAssessment(
         activeChapter.id,
         examMode,
-        selectedSectionIds
+        ids, pages
       );
       setActiveExam(session);
       setMcqSelections({});
@@ -442,10 +450,15 @@ export function App() {
         <div className="flex-1 overflow-y-auto p-3 space-y-4">
           <div>
             <div className="px-2 pb-1.5 text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-              Studied Chapters ({chapters.length})
+              Course folders ({folders.size})
             </div>
             <div className="space-y-1.5">
-              {chapters.map((ch) => (
+              {Array.from(folders, ([key, decks]) => <div key={key} className="rounded-lg border border-slate-800 p-1">
+                <button className="flex w-full items-center gap-2 p-2 text-left text-sm font-bold text-indigo-200" aria-expanded={!foldedCourses[key]} onClick={()=>toggleFolder(key)}><Folder size={15}/>{decks[0].course_name}<span className="ml-auto text-xs text-slate-400">{decks.length} {decks.length===1?'deck':'decks'}</span></button>
+                {!foldedCourses[key] && <div className="ml-2 border-l border-slate-700 pl-2"><div className="mb-2 flex flex-wrap gap-3 text-xs text-indigo-300">
+                  <button aria-label={`Add slides to ${decks[0].course_name}`} onClick={()=>{setCourseName(decks[0].course_name);setImportError('');setShowOnboardModal(true)}}>+ Add slides</button>
+                  <button aria-label={`Open ${decks[0].course_name} wrong question bank`} onClick={async()=>{if(!decks.some(c=>c.id===activeChapter?.id))await refreshChapters(decks[0].id);setWrongFilter('active');setDueOnly(false);setActiveTab('wrong_bank')}}>Wrong bank ({decks.reduce((n,c)=>n+(c.active_wrong_count??0),0)})</button>
+                </div>{decks.map((ch) => (
                 <div
                   key={ch.id}
                   onClick={() => refreshChapters(ch.id)}
@@ -457,9 +470,6 @@ export function App() {
                 >
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="text-[11px] font-medium text-indigo-400 truncate">
-                        {ch.course_name}
-                      </div>
                       <div className="truncate text-xs font-semibold">{ch.chapter_title}</div>
                     </div>
 
@@ -474,7 +484,7 @@ export function App() {
                   </div>
 
                   <div className="mt-2 flex items-center justify-between text-[11px] text-slate-400">
-                    <span>Mastery (&ge;80% Gate)</span>
+                    <span>Sections mastered (avg &gt;80%)</span>
                     <span className="font-bold text-emerald-400">{ch.progress_percentage}%</span>
                   </div>
                   <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
@@ -484,7 +494,7 @@ export function App() {
                     />
                   </div>
                 </div>
-              ))}
+              ))}</div>}</div>)}
             </div>
           </div>
 
@@ -540,11 +550,11 @@ export function App() {
                         {sec.is_mastered ? (
                           <span className="flex items-center gap-1 rounded bg-emerald-500/20 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">
                             <CheckCircle2 className="h-3 w-3" />
-                            {(sec.best_accuracy * 100).toFixed(0)}%
+                            {sec.average_percent}% avg
                           </span>
                         ) : (
                           <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] text-slate-400">
-                            {(sec.best_accuracy * 100).toFixed(0)}% / 80%
+                            {sec.average_percent == null ? 'Not attempted' : `${sec.average_percent}% avg`}
                           </span>
                         )}
                       </div>
@@ -629,14 +639,14 @@ export function App() {
               </select>
 
               <button
-                onClick={handleStartAssessment}
-                disabled={generatingExam || selectedSectionIds.length === 0}
+                onClick={() => examMode === 'midterm' || examMode === 'final' ? setShowExamScope(true) : void handleStartAssessment()}
+                disabled={generatingExam || ((examMode !== 'midterm' && examMode !== 'final') && selectedSectionIds.length === 0)}
                 className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500 disabled:opacity-50 transition"
               >
                 <Play className="h-3.5 w-3.5" />
                 {generatingExam
                   ? `Parallel Generating (${genSeconds}s)...`
-                  : `Generate Quiz/Exam (${selectedSectionIds.length} Sec)`}
+                  : (examMode === 'midterm' || examMode === 'final') ? `Choose ${examMode} slides` : `Generate Quiz/Exam (${selectedSectionIds.length} Sec)`}
               </button>
 
               <button
@@ -647,6 +657,7 @@ export function App() {
                 Split View
               </button>
 
+              {showExamScope && (examMode === 'midterm' || examMode === 'final') && <ExamScopePicker key={`${activeChapter.id}:${examMode}`} mode={examMode} active={activeChapter} chapters={chapters} initial={selectedSectionIds} onClose={()=>setShowExamScope(false)} onGenerate={pages=>{setShowExamScope(false);void handleStartAssessment(pages)}}/>}
               {/* Top Bar Exports strictly export ONLY the currently ticked sections */}
               <a
                 href={OmniStudyAPI.getExportUrl(
@@ -990,7 +1001,7 @@ export function App() {
                                 : 'bg-slate-800 text-slate-300'
                             }`}
                           >
-                            Best Quiz: {(sec.best_accuracy * 100).toFixed(0)}%
+                            {sec.average_percent == null ? 'Not attempted' : `Average: ${sec.average_percent}%`}
                           </span>
                         </div>
                       </div>
@@ -1110,7 +1121,7 @@ export function App() {
                 <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-800 bg-slate-900/70 p-5">
                   <div>
                     <h2 className="text-base font-bold text-white">
-                      Wrong Question Collection (錯題本) — Spaced Review
+                      {activeChapter.course_name} · Course Wrong Question Bank
                     </h2>
                     <p className="text-xs text-slate-400">
                       Answer a question (or its mutated twin) correctly 3 times in a row (0/3 &rarr; 3/3) to graduate it automatically.
@@ -1159,21 +1170,24 @@ export function App() {
 
                 {wrongError ? <div role="alert" className="p-5 text-rose-200">{wrongError} <button onClick={() => refreshChapters(activeChapter.id, selectedSectionIds)}>Retry</button></div> : wrongItems.length === 0 ? (
                   <div className="rounded-2xl border border-slate-800 bg-slate-900/40 p-10 text-center text-xs text-slate-400">
-                    No {wrongFilter} questions in this chapter yet.
+                    No {wrongFilter} questions in this course yet.
                   </div>
+                ) : dueOnly && !wrongItems.some(item=>!item.next_review_at || new Date(item.next_review_at).getTime() <= Date.now()) ? (
+                  <p className="text-slate-400">No reviews are due for this course.</p>
                 ) : (
                   wrongItems.filter(item => !dueOnly || !item.next_review_at || new Date(item.next_review_at).getTime() <= Date.now()).map((item) => (
-                    <WrongQuestionCard
-                      key={item.id}
+                    <div key={item.id}><p className="mb-1 text-xs font-semibold text-indigo-300">Source chapter: {item.chapter_title || chapters.find(c=>c.id===item.chapter_id)?.chapter_title || 'Archived chapter'}</p><WrongQuestionCard
                       item={item}
                       onUpdated={() => refreshChapters(activeChapter.id, selectedSectionIds)}
-                    />
+                    /></div>
                   ))
                 )}
               </div>
             ) : (
               <div className="mx-auto max-w-4xl space-y-4">
                 <h2 className="text-base font-bold">Recorded Study & Assessment History</h2>
+                {activeChapter.course_progress && <ProgressPanel data={activeChapter.course_progress} course={activeChapter.course_name} chapterId={activeChapter.id}/>}
+                <h3 className="font-semibold">Attempts saved in or covering {activeChapter.chapter_title}</h3>
                 {activeChapter.study_history?.map((h) => (
                   <div
                     key={h.session_id}
@@ -1195,10 +1209,10 @@ export function App() {
                       <div className="pt-2 font-semibold text-slate-200">Sections in this attempt</div>
                       {h.sections?.length ? <ul className="space-y-1 text-slate-300">
                         {h.sections.map(s => <li key={s.id ?? 'unknown'}>
-                          <span className="font-medium">{[s.section_code, s.section_title].filter(Boolean).join(' · ') || 'Section not recorded'}</span>
+                          <span className="font-medium">{[s.chapter_title, s.section_code, s.section_title].filter(Boolean).join(' · ') || 'Section not recorded'}</span>
                           {s.slide_pages && <span className="text-slate-400"> · {/^slides?\b/i.test(s.slide_pages) ? s.slide_pages : `Slides ${s.slide_pages}`}</span>}
                           <span className="block text-slate-400">{s.question_count
-                            ? `${s.answered_count} of ${s.question_count} ${s.question_count === 1 ? 'question' : 'questions'} answered`
+                            ? `${s.answered_count} of ${s.question_count} ${s.question_count === 1 ? 'question' : 'questions'} answered${s.earned != null ? ` · ${s.earned} / ${s.possible} pts` : ''}`
                             : 'Selected · no questions linked'}</span>
                         </li>)}
                       </ul> : <div className="text-slate-400">Section information was not recorded for this attempt.</div>}
@@ -1206,7 +1220,7 @@ export function App() {
                     <div className="flex items-center gap-3">
                       <div className="text-right">
                         <div className="text-sm font-bold text-emerald-400">
-                          {h.status.startsWith('submitted_') ? 'Written grading pending' : `${h.total_score} / ${h.max_score} pts (${h.accuracy_percent}%)`}
+                          {h.status.startsWith('submitted_') ? 'Written grading pending' : h.status !== 'completed' ? 'In progress' : `${h.total_score} / ${h.max_score} pts (${h.accuracy_percent}%)`}
                         </div>
                         <div className="text-slate-400">
                           Time Spent: {Math.round(h.time_spent_seconds / 60)} mins
@@ -1283,11 +1297,13 @@ export function App() {
                 </label>
                 <input id="import-course" disabled={onboarding}
                   required
+                  list="course-folders"
                   value={courseName}
                   onChange={(e) => setCourseName(e.target.value)}
                   placeholder="e.g., Quantitative Risk Management / Corporate Finance"
                   className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-white"
                 />
+                <datalist id="course-folders">{Array.from(folders,([key,decks])=><option key={key} value={decks[0].course_name}/>)}</datalist>
               </div>
 
               <div>
