@@ -4,13 +4,21 @@ export interface SlideSection {
   section_title: string;
   slide_pages: string;
   extracted_study_notes?: string;
+  average_percent?: number | null;
   best_accuracy: number;
   latest_accuracy?: number;
   quiz_attempts?: number;
   is_mastered: boolean;
 }
 
+export interface ScoreAverage {attempts:number; in_progress?:number; awaiting_grade?:number; average_percent:number|null; average_earned:number|null; average_possible:number|null; mastered:boolean}
+export type ModeScores = Record<'section_quiz'|'mock_test'|'midterm'|'final', ScoreAverage>;
+export interface CourseProgress {modes:ModeScores; chapters:{id:number; title:string; modes:ModeScores; sections:{id:number;label:string;pages:string;archived:boolean;overall:ScoreAverage;modes:ModeScores}[]}[]}
+
 export interface HistorySection {
+  chapter_title?:string;
+  earned?:number|null;
+  possible?:number;
   id: number | null;
   section_code: string | null;
   section_title: string | null;
@@ -35,6 +43,7 @@ export interface StudyHistoryItem {
 export interface ChapterSummary {
   id: number;
   course_name: string;
+  course_key?: string;
   chapter_title: string;
   slide_file_path?: string;
   textbook_file_path?: string;
@@ -44,6 +53,7 @@ export interface ChapterSummary {
   sections: SlideSection[];
   archived_sections?: SlideSection[];
   study_history?: StudyHistoryItem[];
+  course_progress?: CourseProgress;
 }
 
 export interface SlideOutline {
@@ -99,6 +109,7 @@ export interface ActiveExamSession {
 }
 
 export interface WrongQuestionItem {
+  chapter_title?: string;
   id: number;
   chapter_id: number;
   section_id?: number;
