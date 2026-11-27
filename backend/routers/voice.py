@@ -273,7 +273,7 @@ async def hands_free_voice_discuss(
     if not chapter:
         raise HTTPException(status_code=404, detail="Chapter not found")
 
-    query = db.query(ChapterSection).filter(ChapterSection.chapter_id == req.chapter_id)
+    query = db.query(ChapterSection).filter_by(chapter_id=req.chapter_id, is_archived=False)
     if req.section_ids:
         query = query.filter(ChapterSection.id.in_(req.section_ids))
     sections = query.all()

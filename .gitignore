@@ -4,7 +4,7 @@
 __pycache__/
 *.py[cod]
 .DS_Store
-node_modules/
+node_modules
 frontend/dist/
 backend/storage/*.log
 backend/storage/study_history.db

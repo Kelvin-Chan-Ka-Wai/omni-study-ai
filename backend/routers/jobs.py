@@ -2,11 +2,12 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from database import SessionLocal
-from models import GenerationJob
+from models import Chapter, GenerationJob
+from services.scope import selected_sections, exam_sections
+from services.scoring_engine import ScoringEngine
 from routers.ingestion import regenerate_structured_study_notes, RegenerateNotesRequest
 from routers.assessment import generate_assessment, GenerateAssessmentRequest
 
@@ -19,6 +20,7 @@ class JobRequest(BaseModel):
     chapter_id: int
     section_ids: list[int]
     mode: str = 'section_quiz'
+    exam_pages: dict[int, str] | None = None
 
 
 def set_state(job_id, **fields):
@@ -36,7 +38,7 @@ async def run_job(job_id, req):
             if req.kind == 'notes':
                 result = await regenerate_structured_study_notes(req.chapter_id, RegenerateNotesRequest(section_ids=req.section_ids), db)
             else:
-                result = await generate_assessment(GenerateAssessmentRequest(chapter_id=req.chapter_id, section_ids=req.section_ids, mode=req.mode), db)
+                result = await generate_assessment(GenerateAssessmentRequest(chapter_id=req.chapter_id, section_ids=req.section_ids, mode=req.mode, exam_pages=req.exam_pages), db)
         set_state(job_id, status='completed', result_json=json.dumps(result))
     except asyncio.CancelledError:
         set_state(job_id, status='canceled', message='Canceled. Previously saved work is preserved.')
@@ -52,6 +54,15 @@ async def create_job(req: JobRequest):
     if req.kind not in ('notes', 'assessment') or not req.section_ids:
         raise HTTPException(400, 'Choose a generation type and at least one section')
     with SessionLocal() as db:
+        if not db.get(Chapter, req.chapter_id):
+            raise HTTPException(404, 'Chapter not found. Reload the workspace to see your saved chapters.')
+        if req.kind == 'assessment':
+            exam_sections(db, db.get(Chapter, req.chapter_id), req.section_ids, req.mode, req.exam_pages)
+        else:
+            if req.exam_pages is not None: raise HTTPException(400, 'Exam slide selection is only for exams.')
+            selected_sections(db, req.chapter_id, req.section_ids)
+        if req.kind == 'assessment' and req.mode not in ScoringEngine.EXAM_BLUEPRINTS:
+            raise HTTPException(400, 'Choose a supported assessment mode.')
         if db.query(GenerationJob).filter(GenerationJob.chapter_id == req.chapter_id, GenerationJob.status.in_(['queued', 'running'])).first():
             raise HTTPException(409, 'Generation is already running for this chapter')
         job_id = uuid.uuid4().hex

@@ -10,6 +10,14 @@
 
 Generate notes, practice questions, review mistakes, recover an assessment after refresh, and download academic PDFs. Existing API/provider settings and campus login remain configurable locally.
 
+## Generating notes and papers
+
+Select the sections you want, then choose **Generate Ticked Sections** or **Generate Quiz/Exam**. Notes teach from the selected slides and use matching textbook passages for explanations and page references. Opening slides, closing slides, and publisher credits are filtered from new chapter outlines. Textbooks can be up to 200 MB; slides and testbanks can be up to 50 MB each.
+
+Note generation targets **two minutes**. Several sections can be written at once, sharing a 105-second AI budget that includes waiting for a generation slot. On a slow response, completed lessons are saved. A section that already has notes keeps them; an empty section gets a clearly labeled reading guide with its slides and relevant textbook excerpts where available. Regenerate that section if you want a fresh AI explanation. A guide is not a worked AI lesson. Timing can vary with the machine, document, and provider.
+
+Quizzes, mock tests, midterms, and finals use relevant uploaded testbank questions first. The app generates missing questions in parallel and checks the selected scope, question counts, answer keys, and total marks before saving a paper. The most recently used textbook index and question banks are reused in memory; replacing the source file invalidates its cached entry.
+
 ## What changed
 
 - **Exact section scope:** empty or foreign selections are rejected; generation and export never silently expand to every section.
@@ -86,9 +94,13 @@ Configure only routes you use. The existing router supports campus GenAI, direct
 3. Use **View supporting slides & note history** to verify sources or restore earlier notes.
 4. For image-only material, add a verified page transcription in the study tools. Automatic diagram understanding is not guaranteed.
 5. Open or resume an assessment. Answers autosave; the backend controls time. Practice pause is explicit.
-6. Paste/upload handwriting. Use **Read handwriting into editable answer**, correct the text, then submit.
-7. Review errors, generate twin questions, and use **Due for review only** for scheduled practice.
-8. Download selected notes as PDF/Markdown/LaTeX, or create a private study backup.
+6. Choose **Submit now** whenever you are ready. Photos are optional; only attachments that have finished uploading are included. To add a photo first, use the separate upload window.
+7. The scoreboard shows earned / possible points immediately. Submitted written or calculation work receives its usual personalized analysis in the background; the score is marked final when grading finishes. Open **Study History → Review results** to revisit your work, including why each multiple-choice option is right or wrong. Choice explanations are saved for offline review once prepared.
+8. **Study History** lists the sections for each attempt: section number, title, slide range, and how many questions you answered. A section selected but never tested is labeled separately. New attempts keep their section labels even if the outline changes later.
+
+Quizzes, mock tests, midterms and finals check earlier papers in the same course, including unfinished papers. Unused, relevant testbank questions take priority; changing a bank question’s format does not make it new. When more questions are needed, the app asks for original problems and checks the returned wording for duplicates. If it cannot fill the paper with distinct questions, it leaves your history untouched. Deliberate retries in the Wrong Question Bank are still available.
+9. Review errors, generate twin questions, and use **Due for review only** for scheduled practice.
+9. Download selected notes as PDF/Markdown/LaTeX, or create a private study backup.
 
 ## Verification
 
@@ -108,3 +120,12 @@ Scope citations and structural checks support review; they do not prove that an 
 [Security](SECURITY.md) · [Backend guide](backend/README.md) · [Frontend guide](frontend/README.md)
 
 No distribution license has been selected for the application. Bundled KaTeX retains its upstream license.
+
+
+### Course folders, exam scope, and mastery
+
+Uploaded chapters with the same course title share a sidebar folder (case and extra spaces are ignored). Expand a folder to add slides or open its **Wrong bank**. Active mistakes, graduated items, due reviews and exports include all chapters in that course. Each mistake keeps its original chapter and review streak.
+
+For a **midterm or final**, choose **Choose midterm slides** or **Choose final slides**. Select decks from the current course, individual sections, or specific pages within a section (for example, `8–10, 12`). The paper covers every selected section; up to 29 sections fit a 29-question exam. These choices are independent of study-note and quiz selections and are remembered separately for each exam type.
+
+**Study History → Mastery by assessment** shows course scores, then each chapter and section across quizzes, chapter tests, midterms and finals. The percentage is the arithmetic mean of completed attempt percentages. The points are average earned / average possible per attempt. Each section or chapter uses only its portion of a paper. An average **strictly above 80%** is mastered; exactly 80% needs practice. A section without a graded attempt has no average. Opening History only reads existing records.

@@ -20,6 +20,8 @@ def isolated_database(monkeypatch):
     # No test may use real credentials or make live model calls.
     for key in ('OPEN_WEBUI_API_KEY','DEEPSEEK_API_KEY','OPENAI_API_KEY','UMPASS_USERNAME','UMPASS_PASSWORD'):
         monkeypatch.setattr(settings, key, '')
+    async def offline(*args, **kwargs): return False, "Offline test"
+    monkeypatch.setattr(HybridLLMHarness, "is_um_genai_alive", offline)
     async def unavailable(*args, **kwargs): raise RuntimeError('Mock provider unavailable')
     monkeypatch.setattr(HybridLLMHarness, 'chat', unavailable)
     yield

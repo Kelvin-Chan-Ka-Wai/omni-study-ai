@@ -39,6 +39,7 @@ class ChapterSection(Base):
     section_code = Column(String(64), nullable=False)
     section_title = Column(String(255), nullable=False)
     slide_pages = Column(String(128), nullable=True)
+    is_archived = Column(Boolean, nullable=False, default=False, server_default="0")
     extracted_study_notes = Column(Text, nullable=True)
     best_accuracy = Column(Float, default=0.0)
     latest_accuracy = Column(Float, default=0.0)
@@ -83,6 +84,7 @@ class QuestionRecord(Base):
     question_type = Column(String(32), nullable=False)
     core_concept_tag = Column(String(255), nullable=False)
     slide_reference = Column(String(128), nullable=True)
+    testbank_reference = Column(String(128), nullable=True)
     prompt_markdown = Column(Text, nullable=False)
     options_json = Column(Text, nullable=True)
     correct_answer = Column(Text, nullable=False)
@@ -95,6 +97,24 @@ class QuestionRecord(Base):
 
     session = relationship("ExamSession", back_populates="questions")
     section = relationship("ChapterSection", back_populates="question_records")
+
+class PaperSectionSnapshot(Base):
+    __tablename__ = "paper_section_snapshots"
+    session_id = Column(Integer, ForeignKey("exam_sessions.id", ondelete="CASCADE"), primary_key=True)
+    sections_json = Column(Text, nullable=False)
+
+
+class QuestionSource(Base):
+    __tablename__ = "question_sources"
+    question_id = Column(Integer, ForeignKey("question_records.id", ondelete="CASCADE"), primary_key=True)
+    source_json = Column(Text, nullable=False)  # Original bank stem and choices before adaptation
+
+
+class ChoiceExplanation(Base):
+    __tablename__ = "choice_explanations"
+    question_id = Column(Integer, ForeignKey("question_records.id", ondelete="CASCADE"), primary_key=True)
+    explanations_json = Column(Text, nullable=False)
+
 
 class WrongQuestionBank(Base):
     __tablename__ = "wrong_question_bank"

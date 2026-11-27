@@ -94,6 +94,7 @@ export const PasteSolutionBox: React.FC<Props> = ({
           </span>
           <span className="text-xs text-slate-400">
             [{question.slide_reference} • {question.core_concept_tag}]
+            {question.testbank_reference && <span className="ml-2 text-teal-300">{question.testbank_reference}</span>}
           </span>
         </div>
 
@@ -110,17 +111,18 @@ export const PasteSolutionBox: React.FC<Props> = ({
         </ReactMarkdown>
       </div>
 
+      {isSubmitted && <div className="text-xs font-semibold text-slate-300">Your submitted work</div>}
       <textarea
         disabled={isSubmitted}
         value={typedAnswer}
         onChange={(e) => onChangeTyped(e.target.value)}
-        placeholder="Type your solution / LaTeX steps here, OR click inside this card and press Cmd + V to paste a screenshot / iPad handwritten photo..."
+        placeholder={isSubmitted ? (previewUrl ? "See attached solution below." : "No written answer submitted.") : "Type your solution, or paste a photo into this card."}
         rows={3}
         className="w-full rounded-lg border border-slate-800 bg-slate-950 p-3 text-sm text-slate-100 placeholder-slate-500 focus:border-indigo-500 focus:outline-none"
       />
 
       {/* Cmd+V Paste & Continuity Camera Dropzone */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-3">
+      {!isSubmitted && <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-dashed border-slate-700 bg-slate-950/60 px-4 py-3">
         <div className="flex items-center gap-2.5 text-xs text-slate-300">
           <ClipboardPaste className="h-4 w-4 text-indigo-400" />
           <span>
@@ -140,14 +142,14 @@ export const PasteSolutionBox: React.FC<Props> = ({
             />
           </label>
         )}
-      </div>
+      </div>}
 
       {previewUrl && !isSubmitted && <div className="text-xs text-indigo-200 space-y-2"><button disabled={transcribing} className="underline" onClick={transcribe}>{transcribing ? 'Reading handwriting…' : 'Read handwriting into editable answer'}</button><p>Check the extracted text above before submitting. Your typed answer is used as the verified transcription.</p></div>}
       {previewUrl && (
         <div className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-xs font-medium text-emerald-400">
             <ImageIcon className="h-3.5 w-3.5" />
-            <span>Handwritten Solution Attached (Ready for GLM-OCR & DeepSeek Step Grader):</span>
+            <span>Attached handwritten solution:</span>
           </div>
           <img
             src={previewUrl}
@@ -157,18 +159,20 @@ export const PasteSolutionBox: React.FC<Props> = ({
         </div>
       )}
 
+      {isSubmitted && question.grading_pending && <p className="text-amber-300 text-sm">Written feedback pending.</p>}
+      {isSubmitted && question.correct_answer && <div className="rounded-lg bg-slate-950 p-3 text-sm"><strong className="text-indigo-300">Reference answer</strong><ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>{question.correct_answer}</ReactMarkdown></div>}
       {isSubmitted && question.ai_feedback_and_solution && (
         <div className="mt-4 rounded-lg border border-slate-700/80 bg-slate-950/90 p-4 text-xs space-y-2">
           <div className="flex items-center gap-2 font-semibold text-indigo-300">
-            {question.is_flagged_wrong ? (
+            {question.score_awarded !== undefined && question.score_awarded < 0.8 * question.max_points ? (
               <>
                 <AlertTriangle className="h-4 w-4 text-amber-400" />
-                <span>Below 80% Mastery — Added to Wrong Question Bank • Step-by-Step Rubric Breakdown:</span>
+                <span>Your answer analysis · Below 80%</span>
               </>
             ) : (
               <>
                 <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                <span>Mastered (&ge;80%) • Step-by-Step Rubric Breakdown:</span>
+                <span>Your answer analysis · Mastered</span>
               </>
             )}
           </div>

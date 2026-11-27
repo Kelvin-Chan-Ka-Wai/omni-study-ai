@@ -2,6 +2,7 @@ import re
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 from config import settings
+from services.mastery import Progress
 from models import (
     Chapter,
     ChapterSection,
@@ -255,7 +256,9 @@ class ScoringEngine:
             if q.section_id is not None:
                 section_buckets.setdefault(q.section_id, []).append(q)
 
-        threshold = settings.SECTION_MASTERY_THRESHOLD
+        db.flush()
+        touched = db.query(Chapter).join(ChapterSection).filter(ChapterSection.id.in_(section_buckets)).distinct().all()
+        progress = Progress(db, touched)
 
         for sec_id, sec_questions in section_buckets.items():
             sec_awarded = sum(q.score_awarded for q in sec_questions)
@@ -269,19 +272,11 @@ class ScoringEngine:
                 section.latest_accuracy = sec_acc
                 if sec_acc > section.best_accuracy:
                     section.best_accuracy = sec_acc
-                section.is_mastered = section.best_accuracy >= threshold
+                section.is_mastered = progress.section(sec_id)['mastered']
 
-        all_sections = (
-            db.query(ChapterSection)
-            .filter(ChapterSection.chapter_id == exam.chapter_id)
-            .all()
-        )
-        chapter = db.query(Chapter).filter(Chapter.id == exam.chapter_id).first()
-        if chapter and all_sections:
-            mastered_count = sum(1 for s in all_sections if s.is_mastered)
-            chapter.progress_percentage = round(
-                (mastered_count / len(all_sections)) * 100.0, 1
-            )
+        for source_chapter in touched:
+            source_chapter.progress_percentage = progress.percent_mastered(source_chapter)
+        chapter = db.get(Chapter, exam.chapter_id)
 
         db.commit() if commit else db.flush()
         return {
